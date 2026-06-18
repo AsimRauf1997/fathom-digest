@@ -6,7 +6,7 @@ A small local web app that pulls your **Fathom** meeting notes for a given day
 with one click.
 
 - **In:** Fathom public REST API
-- **Out:** Email via **Resend**, using a **React Email** template
+- **Out:** Email via **SendGrid**, using a **React Email** template
 - **Stack:** Next.js (App Router) + TypeScript, runs locally
 
 ## 1. Setup
@@ -24,16 +24,14 @@ Then fill in `.env.local`:
 - `FATHOM_API_KEY` — create in Fathom (Settings → API keys). Requires a Fathom
   plan that includes API access. Keys are per-user; limit is 60 calls/min.
 
-### Email (Resend)
+### Email (SendGrid)
 
-1. Create a Resend account at resend.com and an API key (**API Keys → Create**).
-   Put it in `RESEND_API_KEY`.
-2. **Verify a sending domain** (**Domains → Add Domain**) and set `MAIL_FROM` to
+1. Create a SendGrid account at sendgrid.com and an API key (**Settings → API Keys → Create API Key**).
+   Put it in `SENDGRID_API_KEY`.
+2. **Verify a sending domain** (**Settings → Sender Authentication**) and set `MAIL_FROM` to
    an address on it, e.g. `notes@yourdomain.com` (optionally a display name in
    `MAIL_FROM_NAME`).
-   - **No domain yet?** For quick testing set `MAIL_FROM=onboarding@resend.dev`
-     (Resend's shared test sender — it only delivers to your own account email).
-     A verified domain is required to email arbitrary recipients in production.
+   - A verified sender domain is required to send emails in production.
 
 ### Recipients
 
@@ -69,7 +67,7 @@ data from the template's `PreviewProps`.
 | `lib/markdown.ts` | Link-free Markdown → text/HTML helpers |
 | `emails/MeetingDigest.tsx` | The **React Email template** (the email's design) |
 | `lib/render-email.tsx` | Renders the template to HTML + plain-text |
-| `lib/mailer.ts` | Sends email via **Resend** (the swappable provider bit) |
+| `lib/mailer.ts` | Sends email via **SendGrid** (the swappable provider bit) |
 | `app/api/meetings/route.ts` | `GET /api/meetings?date=YYYY-MM-DD` or `?id=<meetingId>` |
 | `app/api/preview/route.ts` | `POST /api/preview` → rendered template HTML (live preview) |
 | `app/api/send/route.ts` | `POST /api/send` → re-renders the template and sends |
@@ -82,7 +80,7 @@ data from the template's `PreviewProps`.
   template on the server at send time, so the recipient gets exactly what the
   template produces — the client can't ship broken/edited HTML. Customize via the
   subject and intro note in the UI, or edit the template itself.
-- **Swapping providers:** only `lib/mailer.ts` knows about Resend.
+- **Swapping providers:** only `lib/mailer.ts` knows about SendGrid.
 - The day window is computed in UTC. If meetings near midnight get misfiled, make
   the window timezone-aware in `app/api/meetings/route.ts`.
 - To deploy later (e.g. Vercel), set the same env vars in the host's dashboard.
