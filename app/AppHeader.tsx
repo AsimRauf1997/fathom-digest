@@ -1,4 +1,5 @@
 import NavTabs from "./NavTabs";
+import { LogoutButton } from "@/components/auth/logout-button";
 
 export default function AppHeader() {
   return (
@@ -8,14 +9,17 @@ export default function AppHeader() {
         Fathom Digest
       </span>
       <NavTabs />
-      <a
-        className="utility"
-        href="https://github.com"
-        target="_blank"
-        rel="noreferrer noopener"
-      >
-        Open source · MIT ↗
-      </a>
+      <div className="header-actions">
+        <a
+          className="utility"
+          href="https://github.com"
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          Open source · MIT ↗
+        </a>
+        <LogoutButton />
+      </div>
     </header>
   );
 }

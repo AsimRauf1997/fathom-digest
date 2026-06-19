@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { Meeting } from "@/lib/types";
 import { renderDigestEmail } from "@/lib/render-email";
 import { sendEmail } from "@/lib/mailer";
+import { getCurrentTeamContext } from "@/lib/team-context";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,11 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
  * is sent matches the template exactly — the client cannot ship broken HTML.
  */
 export async function POST(request: Request) {
+  const ctx = await getCurrentTeamContext();
+  if (!ctx) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let body: SendBody;
   try {
     body = (await request.json()) as SendBody;

@@ -19,10 +19,30 @@ cp .env.example .env.local
 
 Then fill in `.env.local`:
 
+### Supabase (Auth + Database)
+
+- `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` — from your
+  Supabase project's **Settings → API**.
+- `SUPABASE_SERVICE_ROLE_KEY` — same page, **server-only**, never exposed to
+  the browser. Used for team invites and reading/writing the encrypted Fathom
+  key.
+- `SUPABASE_DB_ENCRYPTION_KEY` — passphrase used to encrypt each team's Fathom
+  API key at rest via Postgres `pgcrypto`. Generate with
+  `openssl rand -base64 32`. Rotating it requires re-encrypting existing keys
+  first (see `supabase/migrations/0001_init.sql`).
+- `NEXT_PUBLIC_SITE_URL` — base URL used for invite/auth redirect links (e.g.
+  `http://localhost:3000` locally).
+- Apply `supabase/migrations/0001_init.sql` once via the Supabase Dashboard's
+  SQL Editor — it creates the `teams`/`team_members` tables, RLS policies, and
+  the encrypt/decrypt helper functions.
+- Enable Google as an OAuth provider under **Authentication → Providers** if
+  you want "Continue with Google" to work.
+
 ### Fathom
 
-- `FATHOM_API_KEY` — create in Fathom (Settings → API keys). Requires a Fathom
-  plan that includes API access. Keys are per-user; limit is 60 calls/min.
+There's no global Fathom API key anymore — each **team** has its own key,
+entered by an admin during onboarding or from **Settings**. It's encrypted at
+rest and used to fetch meetings for everyone on that team.
 
 ### Email (SendGrid)
 
@@ -32,11 +52,6 @@ Then fill in `.env.local`:
    an address on it, e.g. `notes@yourdomain.com` (optionally a display name in
    `MAIL_FROM_NAME`).
    - A verified sender domain is required to send emails in production.
-
-### Recipients
-
-- `RECIPIENTS` — comma-separated emails that prefill the recipient list (still
-  editable in the UI). **While testing, set this to your own email first.**
 
 ## 2. Run
 
@@ -51,13 +66,18 @@ data from the template's `PreviewProps`.
 
 ## 3. Use
 
-1. Pick a **Source**: **By date** (loads that day's meetings) or **By meeting ID**
+1. **Sign up** at `/signup` (email/password or Google). The first user on a
+   team creates it during onboarding and becomes its **admin** — entering a
+   Fathom API key there is optional and can be added later from **Settings**.
+2. Admins can invite teammates by email from **Settings**; invited users join
+   the same team as **members** automatically once they accept.
+3. Pick a **Source**: **By date** (loads that day's meetings) or **By meeting ID**
    (loads a single meeting). The app loads today's meetings on first open.
-2. Review each meeting in the **Briefing** column: title, time, summary, actions.
-3. In **Dispatch**: edit the subject, add an optional **intro note**, and watch the
+4. Review each meeting in the **Briefing** column: title, time, summary, actions.
+5. In **Dispatch**: edit the subject, add an optional **intro note**, and watch the
    **email preview** re-render live. The body is generated from the template — to
    change its design, edit `emails/MeetingDigest.tsx`.
-4. Confirm recipients, then click **Send dispatch**.
+6. Confirm recipients, then click **Send dispatch**.
 
 ## How it fits together
 
@@ -72,6 +92,12 @@ data from the template's `PreviewProps`.
 | `app/api/preview/route.ts` | `POST /api/preview` → rendered template HTML (live preview) |
 | `app/api/send/route.ts` | `POST /api/send` → re-renders the template and sends |
 | `app/DigestApp.tsx` | The single-screen UI |
+| `lib/supabase/server.ts` / `client.ts` / `admin.ts` | Supabase Auth/DB clients (server, browser, service-role) |
+| `lib/team-context.ts` | Resolves the logged-in user's team + decrypted Fathom key |
+| `app/login`, `app/signup`, `app/auth/callback` | Auth pages and OAuth/invite callback |
+| `app/onboarding` | Create-a-team flow (admin), with skippable Fathom key entry |
+| `app/settings` | Manage the team's Fathom key, invite members, manage roles |
+| `supabase/migrations/0001_init.sql` | `teams`/`team_members` schema, RLS policies, key encryption functions |
 
 ## Notes
 

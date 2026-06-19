@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Meeting } from "@/lib/types";
 import AppHeader from "./AppHeader";
@@ -41,8 +42,10 @@ type Status =
 
 export default function DigestApp({
   initialRecipients,
+  hasFathomKey,
 }: {
   initialRecipients: string[];
+  hasFathomKey: boolean;
 }) {
   const [date, setDate] = useState(todayStr());
   const [submittedDate, setSubmittedDate] = useState(todayStr());
@@ -161,6 +164,14 @@ export default function DigestApp({
   return (
     <div className="wrap">
       <AppHeader />
+
+      {!hasFathomKey && (
+        <Alert variant="err" className="mb-4">
+          No Fathom API key is configured for your team.{" "}
+          <Link href="/settings">Add one in Settings</Link> to start fetching
+          meetings.
+        </Alert>
+      )}
 
       {/* Source bar */}
       <div className="sourcebar">

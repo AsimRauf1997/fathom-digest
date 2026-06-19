@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { Meeting } from "@/lib/types";
 import { renderDigestEmail } from "@/lib/render-email";
+import { getCurrentTeamContext } from "@/lib/team-context";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,11 @@ interface PreviewBody {
  * Renders the email template and returns { subject, html } for the live preview.
  */
 export async function POST(request: Request) {
+  const ctx = await getCurrentTeamContext();
+  if (!ctx) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let body: PreviewBody;
   try {
     body = (await request.json()) as PreviewBody;

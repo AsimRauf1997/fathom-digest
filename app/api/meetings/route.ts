@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { listMeetings } from "@/lib/fathom";
+import { getCurrentTeamContext, getTeamFathomKey } from "@/lib/team-context";
 
 export const dynamic = "force-dynamic";
 
@@ -11,9 +12,22 @@ export async function GET(request: Request) {
   const date = searchParams.get("date");
 
   try {
+    const ctx = await getCurrentTeamContext();
+    if (!ctx) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return NextResponse.json(
         { error: "Provide a date as YYYY-MM-DD." },
+        { status: 400 },
+      );
+    }
+
+    const apiKey = await getTeamFathomKey(ctx.teamId);
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "No Fathom API key configured for your team. Add one in Settings." },
         { status: 400 },
       );
     }
@@ -25,7 +39,7 @@ export async function GET(request: Request) {
     beforeDate.setUTCDate(beforeDate.getUTCDate() + 1);
     const before = beforeDate.toISOString();
 
-    const meetings = await listMeetings(after, before);
+    const meetings = await listMeetings(apiKey, after, before);
     return NextResponse.json({ meetings });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";

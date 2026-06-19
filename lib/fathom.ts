@@ -4,11 +4,10 @@ import type { Meeting as SdkMeeting } from "fathom-typescript/sdk/models/shared"
 import type { Meeting } from "./types";
 import { stripMarkdownLinks } from "./markdown";
 
-function client(): Fathom {
-  const apiKey = process.env.FATHOM_API_KEY;
+function client(apiKey: string): Fathom {
   if (!apiKey) {
     throw new Error(
-      "FATHOM_API_KEY is not set. Add it to .env.local (see .env.example).",
+      "No Fathom API key configured for this team. Add one in Settings.",
     );
   }
   return new Fathom({
@@ -49,7 +48,7 @@ function rethrow(err: unknown): never {
   if (err instanceof FathomError) {
     if (err.statusCode === 401 || err.statusCode === 403) {
       throw new Error(
-        "Fathom rejected the API key (401/403). Check FATHOM_API_KEY and that your plan includes API access.",
+        "Fathom rejected the API key (401/403). Check the Fathom API key configured in Settings and that your plan includes API access.",
       );
     }
     throw new Error(
@@ -65,10 +64,11 @@ function rethrow(err: unknown): never {
  * (Transcripts are intentionally NOT requested.)
  */
 export async function listMeetings(
+  apiKey: string,
   after: string,
   before: string,
 ): Promise<Meeting[]> {
-  const fathom = client();
+  const fathom = client(apiKey);
   const meetings: Meeting[] = [];
 
   try {

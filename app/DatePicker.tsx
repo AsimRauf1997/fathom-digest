@@ -73,7 +73,7 @@ export default function DatePicker({
             if (e.key === "Enter" && !open) onEnter?.();
           }}
           className={cn(
-            "flex h-11 w-full items-center gap-2.5 rounded-[var(--radius-sm)] border border-input bg-[var(--paper-3)] px-3.5 text-left font-sans text-[14px] text-foreground transition-colors",
+            "flex h-10 w-full items-center gap-2.5 rounded-[var(--radius-sm)] border border-input bg-[var(--paper-3)] px-3.5 py-1.5 text-left font-sans text-[14px] text-foreground transition-colors",
             "hover:border-ink-soft",
             "data-[state=open]:border-accent data-[state=open]:ring-4 data-[state=open]:ring-accent-wash data-[state=open]:outline-none"
           )}
