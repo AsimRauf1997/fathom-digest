@@ -14,30 +14,35 @@ export class FakeDatabase {
   private uniqueConstraints: Map<string, Set<string>> = new Map();
 
   constructor() {
-    this.tables.set('teams', []);
-    this.tables.set('team_members', []);
-    this.tables.set('invites', []);
-    this.uniqueConstraints.set('team_members:user_id', new Set());
+    this.tables.set("teams", []);
+    this.tables.set("team_members", []);
+    this.tables.set("invites", []);
+    this.uniqueConstraints.set("team_members:user_id", new Set());
   }
 
   insert(table: string, row: FakeSupabaseRow): FakeSupabaseRow {
     // Enforce team_members.user_id unique constraint
-    if (table === 'team_members') {
+    if (table === "team_members") {
       const existing = this.tables
-        .get('team_members')!
+        .get("team_members")!
         .find((r) => r.user_id === row.user_id && r.team_id === row.team_id);
       if (existing) {
-        throw new Error('duplicate key value violates unique constraint');
+        throw new Error("duplicate key value violates unique constraint");
       }
     }
 
     // Enforce invites pending unique (team_id, email)
-    if (table === 'invites' && row.status === 'pending') {
+    if (table === "invites" && row.status === "pending") {
       const existing = this.tables
-        .get('invites')!
-        .find((r) => r.team_id === row.team_id && r.email === row.email && r.status === 'pending');
+        .get("invites")!
+        .find(
+          (r) =>
+            r.team_id === row.team_id &&
+            r.email === row.email &&
+            r.status === "pending",
+        );
       if (existing) {
-        throw new Error('duplicate key value violates unique constraint');
+        throw new Error("duplicate key value violates unique constraint");
       }
     }
 
@@ -67,7 +72,11 @@ export class FakeDatabase {
     if (idx === -1) {
       throw new Error(`Row not found in ${table} with id ${id}`);
     }
-    const updated = { ...rows[idx], ...updates, updated_at: new Date().toISOString() };
+    const updated = {
+      ...rows[idx],
+      ...updates,
+      updated_at: new Date().toISOString(),
+    };
     rows[idx] = updated;
     return updated;
   }
@@ -122,7 +131,9 @@ class QueryBuilder {
   }
 
   maybeSingle(): { data: FakeSupabaseRow | null; error: null } {
-    let result = this.rows.filter((r) => this.whereConditions.every((c) => c(r)));
+    let result = this.rows.filter((r) =>
+      this.whereConditions.every((c) => c(r)),
+    );
 
     if (this.orderBy) {
       result.sort((a, b) => {
@@ -166,9 +177,14 @@ class QueryBuilder {
 export class FakeSupabaseClient {
   private db: FakeDatabase;
   private currentUser: FakeAuthUser | null = null;
+  public callLog: { method: string; args: any[] }[] = [];
 
   constructor(db: FakeDatabase) {
     this.db = db;
+  }
+
+  private recordCall(method: string, args: any[]) {
+    this.callLog.push({ method, args });
   }
 
   from(table: string) {
@@ -208,13 +224,14 @@ export class FakeSupabaseClient {
     },
     admin: {
       inviteUserByEmail: async (email: string, _options?: any) => {
-        const existing = this.db
-          .getAll('team_members')
-          .find((m) => m.invited_email === email);
-        if (existing) {
+        this.recordCall('inviteUserByEmail', [email]);
+        const existingInvites = this.db
+          .getAll("invites")
+          .filter((inv) => inv.email?.toLowerCase() === email.toLowerCase());
+        if (existingInvites.some((inv) => inv.status === "pending")) {
           return {
             data: null,
-            error: { message: 'User already registered' },
+            error: { message: "User already registered" },
           };
         }
         const userId = crypto.randomUUID();
@@ -223,20 +240,25 @@ export class FakeSupabaseClient {
           error: null,
         };
       },
-      listUsers: async () => ({
-        data: {
-          users: [
-            { id: 'user1', email: 'user1@example.com' },
-            { id: 'user2', email: 'user2@example.com' },
-          ],
-        },
-        error: null,
-      }),
+      listUsers: async () => {
+        this.recordCall('listUsers', []);
+        return {
+          data: {
+            users: [
+              { id: "invited-user-1", email: "invited@example.com" },
+            ],
+          },
+          error: null,
+        };
+      },
     },
-    resetPasswordForEmail: async (email: string, _options?: any) => ({
-      data: null,
-      error: null,
-    }),
+    resetPasswordForEmail: async (email: string, _options?: any) => {
+      this.recordCall('resetPasswordForEmail', [email]);
+      return {
+        data: null,
+        error: null,
+      };
+    },
   };
 }
 

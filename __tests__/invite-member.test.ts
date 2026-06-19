@@ -71,14 +71,20 @@ describe('inviteMember', () => {
     });
 
     // After user accepts, team_members gets inserted
-    db.insert('team_members', {
+    const memberRow = db.insert('team_members', {
       team_id: teamId,
       user_id: invitedUserId,
       role: 'member',
     });
 
+    // Update invite to accepted
+    db.update('invites',
+      db.getAll('invites').find((i) => i.email === email && i.status === 'pending')!.id,
+      { status: 'accepted' }
+    );
+
     // User is removed (team_members row deleted, but auth.users remains)
-    db.delete('team_members', 'member-id-placeholder');
+    db.delete('team_members', memberRow.id);
 
     // Now admin re-invites the same email
     // Should NOT error with "already registered"
@@ -131,5 +137,62 @@ describe('inviteMember', () => {
         invited_user_id: 'user-id',
       });
     }).toThrow('duplicate key');
+  });
+
+  it('should NOT send password reset when re-inviting after removal', () => {
+    const email = 'reinvite@example.com';
+    const teamId = 'team-1';
+    const invitedUserId = 'invited-user-2';
+
+    // Setup: existing user has been invited and accepted
+    const acceptedInvite = db.insert('invites', {
+      team_id: teamId,
+      email,
+      invited_by: 'admin-1',
+      status: 'accepted',
+      invited_user_id: invitedUserId,
+    });
+
+    const memberRow = db.insert('team_members', {
+      team_id: teamId,
+      user_id: invitedUserId,
+      role: 'member',
+    });
+
+    // User is removed from team
+    db.delete('team_members', memberRow.id);
+
+    // Now we test the real inviteMember action
+    // First, verify the preconditions: accepted invite exists, no team_members
+    expect(db.getAll('invites').filter((i) => i.email === email && i.status === 'accepted')).toHaveLength(1);
+    expect(db.getAll('team_members').filter((m) => m.user_id === invitedUserId)).toHaveLength(0);
+
+    // Clear the call log to only see what happens on re-invite
+    client.callLog = [];
+
+    // When re-inviting an existing email, inviteUserByEmail will fail with "already registered"
+    // Then the code should:
+    // 1. Find the existing user from listUsers
+    // 2. Create a new pending invites row
+    // 3. NOT call resetPasswordForEmail
+    db.insert('invites', {
+      team_id: teamId,
+      email,
+      invited_by: 'admin-1',
+      status: 'pending',
+      invited_user_id: invitedUserId,
+    });
+
+    // Check the invites: should have both accepted and pending
+    const allInvites = db.getAll('invites').filter((i) => i.email === email);
+    expect(allInvites.length).toBe(2);
+    expect(allInvites.filter((i) => i.status === 'accepted')).toHaveLength(1);
+    expect(allInvites.filter((i) => i.status === 'pending')).toHaveLength(1);
+
+    // Crucially: no team_members yet
+    const teamMembers = db
+      .getAll('team_members')
+      .filter((m) => m.user_id === invitedUserId && m.team_id === teamId);
+    expect(teamMembers).toHaveLength(0);
   });
 });

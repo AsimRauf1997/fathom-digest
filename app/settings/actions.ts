@@ -83,12 +83,6 @@ export async function inviteMember(
       return { error: "Could not find the existing account for that email." };
     }
     userId = existingUser.id;
-
-    const { error: resetError } =
-      await admin.auth.resetPasswordForEmail(email, {
-        redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? ""}/auth/callback`,
-      });
-    if (resetError) return { error: resetError.message };
   } else {
     if (!inviteData.user) return { error: "Invite did not return a user." };
     userId = inviteData.user.id;
