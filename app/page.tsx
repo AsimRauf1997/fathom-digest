@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { and, eq } from "drizzle-orm";
 import DigestApp from "./DigestApp";
+import LandingPage from "./LandingPage";
 import { db } from "@/lib/db";
 import { invites, teamMembers, teams } from "@/lib/db/schema";
 
@@ -9,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 export default async function Page() {
   const { userId } = await auth();
-  if (!userId) redirect("/login");
+  if (!userId) return <LandingPage />;
 
   const membership = await db.query.teamMembers.findFirst({
     where: eq(teamMembers.userId, userId),
