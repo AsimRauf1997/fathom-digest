@@ -5,6 +5,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCurrentTeamContext, type TeamContext } from "@/lib/team-context";
 import type { ActionState } from "@/lib/action-state";
+import { sendEmail } from "@/lib/mailer";
+import { renderTeamInviteEmail } from "@/lib/render-email";
 
 async function requireAdminContext(): Promise<
   { ctx: TeamContext } | { error: string }
@@ -83,6 +85,56 @@ export async function inviteMember(
       return { error: "Could not find the existing account for that email." };
     }
     userId = existingUser.id;
+
+    // Generate a magic link and send a team invite email for the existing user
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "";
+    const { data: linkData, error: linkError } =
+      await admin.auth.admin.generateLink({
+        type: "magiclink",
+        email,
+        options: { redirectTo: `${siteUrl}/auth/callback` },
+      });
+
+    if (linkError) {
+      return {
+        error: `Could not generate sign-in link: ${linkError.message}`,
+      };
+    }
+
+    const acceptUrl = linkData?.properties?.action_link;
+    if (!acceptUrl) {
+      return { error: "Could not generate sign-in link." };
+    }
+
+    // Get the team name for the email
+    const { data: team } = await admin
+      .from("teams")
+      .select("name")
+      .eq("id", result.ctx.teamId)
+      .single();
+
+    const teamName = team?.name ?? "your team";
+    const inviterUser = await createClient().auth.getUser();
+    const inviterEmail = inviterUser.data?.user?.email ?? "a team admin";
+
+    // Render and send the team invite email
+    try {
+      const { subject, html, text } = await renderTeamInviteEmail({
+        teamName,
+        inviterEmail,
+        acceptUrl,
+      });
+
+      await sendEmail({
+        to: [email],
+        subject,
+        html,
+        text,
+      });
+    } catch (emailError) {
+      // Log the error but don't fail the invite if email fails
+      console.error("Failed to send team invite email:", emailError);
+    }
   } else {
     if (!inviteData.user) return { error: "Invite did not return a user." };
     userId = inviteData.user.id;

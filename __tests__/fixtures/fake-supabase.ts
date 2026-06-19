@@ -7,7 +7,7 @@ export type FakeAuthUser = {
   email_confirmed_at?: string;
 };
 
-export type FakeSupabaseRow = Record<string, any>;
+export type FakeSupabaseRow = Record<string, unknown>;
 
 export class FakeDatabase {
   private tables: Map<string, FakeSupabaseRow[]> = new Map();
@@ -111,11 +111,11 @@ class QueryBuilder {
     this.rows = rows;
   }
 
-  select(_columns?: string): QueryBuilder {
+  select(): QueryBuilder {
     return this;
   }
 
-  eq(column: string, value: any): QueryBuilder {
+  eq(column: string, value: unknown): QueryBuilder {
     this.whereConditions.push((r) => r[column] === value);
     return this;
   }
@@ -159,12 +159,12 @@ class QueryBuilder {
     return { data: result.data, error: null };
   }
 
-  insert(row: FakeSupabaseRow): { error: null } {
+  insert(): { error: null } {
     // Caller handles insert logic; we just validate here
     return { error: null };
   }
 
-  update(updates: FakeSupabaseRow): QueryBuilder {
+  update(): QueryBuilder {
     // Marked for update; caller will call eq() then finalize
     return this;
   }
@@ -177,13 +177,14 @@ class QueryBuilder {
 export class FakeSupabaseClient {
   private db: FakeDatabase;
   private currentUser: FakeAuthUser | null = null;
-  public callLog: { method: string; args: any[] }[] = [];
+  public callLog: { method: string; args: unknown[] }[] = [];
+  private linkCounter = 0;
 
   constructor(db: FakeDatabase) {
     this.db = db;
   }
 
-  private recordCall(method: string, args: any[]) {
+  private recordCall(method: string, args: unknown[]) {
     this.callLog.push({ method, args });
   }
 
@@ -194,23 +195,23 @@ export class FakeSupabaseClient {
         try {
           const inserted = this.db.insert(table, row);
           return { data: inserted, error: null };
-        } catch (e: any) {
-          return { data: null, error: { message: e.message } };
+        } catch (e: unknown) {
+          return { data: null, error: { message: e instanceof Error ? e.message : String(e) } };
         }
       },
       update: (updates: FakeSupabaseRow) => ({
-        eq: (column: string, value: any) => ({
-          data: this.db.update(table, value, updates),
+        eq: (column: string, value: unknown) => ({
+          data: this.db.update(table, value as string, updates),
           error: null,
         }),
       }),
       delete: () => ({
-        eq: (column: string, value: any) => {
+        eq: (column: string, value: unknown) => {
           try {
-            this.db.delete(table, value);
+            this.db.delete(table, value as string);
             return { data: null, error: null };
-          } catch (e: any) {
-            return { data: null, error: { message: e.message } };
+          } catch (e: unknown) {
+            return { data: null, error: { message: e instanceof Error ? e.message : String(e) } };
           }
         },
       }),
@@ -223,7 +224,7 @@ export class FakeSupabaseClient {
       this.currentUser = user;
     },
     admin: {
-      inviteUserByEmail: async (email: string, _options?: any) => {
+      inviteUserByEmail: async (email: string) => {
         this.recordCall('inviteUserByEmail', [email]);
         const existingInvites = this.db
           .getAll("invites")
@@ -251,8 +252,19 @@ export class FakeSupabaseClient {
           error: null,
         };
       },
+      generateLink: async (options?: unknown) => {
+        this.recordCall('generateLink', [options]);
+        const fakeLink = `https://example.com/auth/callback?token_hash=fake-${this.linkCounter++}&type=${options?.type || 'magiclink'}`;
+        return {
+          data: {
+            properties: { action_link: fakeLink },
+            user: { id: "invited-user-1", email: options?.email || "invited@example.com" },
+          },
+          error: null,
+        };
+      },
     },
-    resetPasswordForEmail: async (email: string, _options?: any) => {
+    resetPasswordForEmail: async (email: string) => {
       this.recordCall('resetPasswordForEmail', [email]);
       return {
         data: null,
@@ -262,8 +274,16 @@ export class FakeSupabaseClient {
   };
 }
 
+export interface EmailSendRecord {
+  to: string[];
+  subject: string;
+  html: string;
+  text?: string;
+}
+
 export function createFakeSupabaseSetup() {
   const db = new FakeDatabase();
   const client = new FakeSupabaseClient(db);
-  return { db, client };
+  const emailLog: EmailSendRecord[] = [];
+  return { db, client, emailLog };
 }

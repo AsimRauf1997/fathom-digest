@@ -25,6 +25,12 @@ export async function acceptInvite(): Promise<ActionState> {
   if (!invite) return { error: "No pending invite found for this account." };
 
   const ctx = await getCurrentTeamContext();
+  if (ctx && ctx.teamId !== invite.team_id) {
+    return {
+      error: "You're already part of a team. Leave your current team before accepting this invite.",
+    };
+  }
+
   if (!ctx) {
     const { error: memberError } = await admin
       .from("team_members")

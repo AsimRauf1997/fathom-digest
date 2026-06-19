@@ -2,6 +2,7 @@ import { render } from "@react-email/render";
 import * as React from "react";
 import type { Meeting } from "./types";
 import MeetingDigest from "../emails/MeetingDigest";
+import TeamInvite from "../emails/TeamInvite";
 
 export function defaultSubject(label: string): string {
   return `Meeting notes — ${label}`;
@@ -31,4 +32,33 @@ export async function renderDigestEmail({
     render(element, { plainText: true }),
   ]);
   return { subject: defaultSubject(label), html, text };
+}
+
+export interface RenderTeamInviteInput {
+  teamName: string;
+  inviterEmail: string;
+  acceptUrl: string;
+}
+
+export async function renderTeamInviteEmail({
+  teamName,
+  inviterEmail,
+  acceptUrl,
+}: RenderTeamInviteInput): Promise<{ subject: string; html: string; text: string }> {
+  const element = (
+    <TeamInvite
+      teamName={teamName}
+      inviterEmail={inviterEmail}
+      acceptUrl={acceptUrl}
+    />
+  );
+  const [html, text] = await Promise.all([
+    render(element),
+    render(element, { plainText: true }),
+  ]);
+  return {
+    subject: `You've been invited to join ${teamName}`,
+    html,
+    text,
+  };
 }
