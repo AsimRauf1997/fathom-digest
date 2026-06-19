@@ -2,13 +2,14 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/client";
+import { useSignUp } from "@clerk/nextjs/legacy";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert } from "@/components/ui/alert";
 import { AuthShell } from "@/components/auth/AuthShell";
 import { Mail, Lock, Eye, EyeOff, ArrowRight } from "lucide-react";
+import { createUserRecord } from "./actions";
 
 function GoogleMark() {
   return (
@@ -33,45 +34,110 @@ function GoogleMark() {
   );
 }
 
+function errorMessage(err: unknown): string {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "errors" in err &&
+    Array.isArray((err as { errors: unknown }).errors)
+  ) {
+    const first = (err as { errors: { message?: string }[] }).errors[0];
+    if (first?.message) return first.message;
+  }
+  return "Something went wrong. Please try again.";
+}
+
 export default function SignupPage() {
+  const { signUp, setActive, isLoaded } = useSignUp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [verificationCode, setVerificationCode] = useState("");
+  const [isVerifying, setIsVerifying] = useState(false);
 
-  const signUp = async (e: React.FormEvent) => {
+  const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isLoaded) return;
     setError(null);
     setInfo(null);
     setLoading(true);
-    const supabase = createClient();
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
-    });
-    setLoading(false);
-    if (error) {
-      setError(error.message);
-      return;
+
+    try {
+      const result = await signUp.create({
+        emailAddress: email,
+        password,
+      });
+      console.log("result", result);
+      if (result.status === "complete") {
+        await setActive({ session: result.createdSessionId });
+        window.location.href = "/onboarding";
+        return;
+      }
+
+      if (result.status === "missing_requirements") {
+        await signUp.prepareEmailAddressVerification();
+        setIsVerifying(true);
+        setInfo(`Verification code sent to ${email}`);
+        return;
+      }
+
+      setError("Could not complete sign up. Please try again.");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
     }
-    if (data.session) {
-      window.location.href = "/onboarding";
-      return;
+  };
+
+  const handleVerifyEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isLoaded || !verificationCode) return;
+    setError(null);
+    setLoading(true);
+
+    try {
+      const result = await signUp.attemptEmailAddressVerification({
+        code: verificationCode,
+      });
+
+      if (result.status === "complete") {
+        await setActive({ session: result.createdSessionId });
+
+        // Create user record in database
+        await createUserRecord({
+          id: result.createdUserId!,
+          email,
+          name: null,
+          avatarUrl: null,
+        });
+
+        window.location.href = "/onboarding";
+        return;
+      }
+
+      setError("Verification failed. Please check your code and try again.");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
     }
-    setInfo("Check your email to confirm your account, then sign in.");
   };
 
   const signUpWithGoogle = async () => {
+    if (!isLoaded) return;
     setError(null);
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: `${window.location.origin}/auth/callback` },
-    });
-    if (error) setError(error.message);
+    try {
+      await signUp.authenticateWithRedirect({
+        strategy: "oauth_google",
+        redirectUrl: "/sso-callback",
+        redirectUrlComplete: "/onboarding",
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+    }
   };
 
   return (
@@ -90,46 +156,67 @@ export default function SignupPage() {
         <p>It only takes a minute, no credit card required.</p>
       </div>
 
-      <form onSubmit={signUp}>
-        <div className="stack">
-          <Label htmlFor="email">Email</Label>
-          <div className="auth-field">
-            <Mail size={16} className="field-icon" />
+      <form onSubmit={isVerifying ? handleVerifyEmail : handleSignUp}>
+        {!isVerifying ? (
+          <>
+            <div className="stack">
+              <Label htmlFor="email">Email</Label>
+              <div className="auth-field">
+                <Mail size={16} className="field-icon" />
+                <Input
+                  id="email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="you@company.com"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="stack">
+              <Label htmlFor="password">Password</Label>
+              <div className="auth-field">
+                <Lock size={16} className="field-icon" />
+                <Input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="new-password"
+                  minLength={6}
+                  placeholder="At least 6 characters"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="field-toggle"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="stack">
+            <Label htmlFor="code">Verification Code</Label>
+            <p className="text-sm text-gray-600 mb-2">
+              Enter the code we sent to {email}
+            </p>
             <Input
-              id="email"
-              type="email"
-              autoComplete="email"
-              placeholder="you@company.com"
+              id="code"
+              type="text"
+              autoComplete="off"
+              placeholder="000000"
               required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              value={verificationCode}
+              onChange={(e) => setVerificationCode(e.target.value)}
+              maxLength={6}
             />
           </div>
-        </div>
-        <div className="stack">
-          <Label htmlFor="password">Password</Label>
-          <div className="auth-field">
-            <Lock size={16} className="field-icon" />
-            <Input
-              id="password"
-              type={showPassword ? "text" : "password"}
-              autoComplete="new-password"
-              minLength={6}
-              placeholder="At least 6 characters"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-            <button
-              type="button"
-              className="field-toggle"
-              onClick={() => setShowPassword((v) => !v)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
-            >
-              {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
-          </div>
-        </div>
+        )}
 
         {error && (
           <Alert variant="err" className="mb-4">
@@ -142,6 +229,8 @@ export default function SignupPage() {
           </Alert>
         )}
 
+        <div id="clerk-captcha" />
+
         <Button
           type="submit"
           variant="primary"
@@ -151,29 +240,52 @@ export default function SignupPage() {
         >
           {loading ? (
             <>
-              <span className="spinner" /> Creating account…
+              <span className="spinner" /> {isVerifying ? "Verifying…" : "Creating account…"}
             </>
           ) : (
             <>
-              Create account <ArrowRight size={15} />
+              {isVerifying ? "Verify Email" : "Create account"} <ArrowRight size={15} />
             </>
           )}
         </Button>
       </form>
 
-      <div className="auth-divider">Or continue with</div>
+      {!isVerifying && (
+        <>
+          <div className="auth-divider">Or continue with</div>
 
-      <Button
-        variant="outline"
-        className="w-full"
-        onClick={signUpWithGoogle}
-        type="button"
-      >
-        <GoogleMark /> Continue with Google
-      </Button>
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={signUpWithGoogle}
+            type="button"
+          >
+            <GoogleMark /> Continue with Google
+          </Button>
+        </>
+      )}
 
       <p className="auth-foot">
-        Already have an account? <Link href="/login">Sign in</Link>
+        {isVerifying ? (
+          <>
+            Wrong email?{" "}
+            <button
+              type="button"
+              onClick={() => {
+                setIsVerifying(false);
+                setVerificationCode("");
+                setInfo(null);
+              }}
+              className="link"
+            >
+              Start over
+            </button>
+          </>
+        ) : (
+          <>
+            Already have an account? <Link href="/login">Sign in</Link>
+          </>
+        )}
       </p>
     </AuthShell>
   );

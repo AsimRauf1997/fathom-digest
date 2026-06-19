@@ -1,9 +1,10 @@
 "use server";
 
-import { randomUUID } from "crypto";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { auth, currentUser } from "@clerk/nextjs/server";
+import { db } from "@/lib/db";
+import { teamMembers, teams, users } from "@/lib/db/schema";
+import { encryptFathomKey } from "@/lib/crypto/fathom-key";
 import { getCurrentTeamContext } from "@/lib/team-context";
 import type { ActionState } from "@/lib/action-state";
 
@@ -18,11 +19,8 @@ export async function createTeam(
     return { error: "Team name is required." };
   }
 
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
+  const { userId } = await auth();
+  if (!userId) {
     redirect("/login");
   }
 
@@ -31,32 +29,53 @@ export async function createTeam(
     redirect("/");
   }
 
-  const teamId = randomUUID();
-  const { error: teamError } = await supabase
-    .from("teams")
-    .insert({ id: teamId, name });
-  if (teamError) {
-    return { error: teamError.message };
+  const clerkUser = await currentUser();
+  if (!clerkUser?.id) {
+    return { error: "Unable to fetch user information." };
   }
 
-  const { error: memberError } = await supabase
-    .from("team_members")
-    .insert({ team_id: teamId, user_id: user.id, role: "admin" });
-  if (memberError) {
-    return { error: memberError.message };
-  }
-
-  if (fathomKey) {
-    const admin = createAdminClient();
-    const { error: keyError } = await admin.rpc("set_team_fathom_key", {
-      p_team_id: teamId,
-      p_plaintext_key: fathomKey,
-      p_passphrase: process.env.SUPABASE_DB_ENCRYPTION_KEY,
+  await db
+    .insert(users)
+    .values({
+      id: clerkUser.id,
+      email:
+        clerkUser.emailAddresses[0]?.emailAddress ||
+        clerkUser.primaryEmailAddress?.emailAddress ||
+        "",
+      name:
+        [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" ") ||
+        null,
+      avatarUrl: clerkUser.imageUrl || null,
+    })
+    .onConflictDoUpdate({
+      target: users.id,
+      set: {
+        email:
+          clerkUser.emailAddresses[0]?.emailAddress ||
+          clerkUser.primaryEmailAddress?.emailAddress ||
+          "",
+        name:
+          [clerkUser.firstName, clerkUser.lastName]
+            .filter(Boolean)
+            .join(" ") || null,
+        avatarUrl: clerkUser.imageUrl || null,
+        updatedAt: new Date(),
+      },
     });
-    if (keyError) {
-      return { error: keyError.message };
-    }
-  }
+
+  const [team] = await db
+    .insert(teams)
+    .values({
+      name,
+      fathomApiKeyEnc: fathomKey ? encryptFathomKey(fathomKey) : null,
+    })
+    .returning({ id: teams.id });
+
+  await db.insert(teamMembers).values({
+    teamId: team.id,
+    userId,
+    role: "admin",
+  });
 
   redirect("/");
 }

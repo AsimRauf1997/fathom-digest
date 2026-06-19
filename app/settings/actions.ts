@@ -1,8 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { clerkClient } from "@clerk/nextjs/server";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { invites, teamMembers, teams } from "@/lib/db/schema";
+import { encryptFathomKey } from "@/lib/crypto/fathom-key";
 import { getCurrentTeamContext, type TeamContext } from "@/lib/team-context";
 import type { ActionState } from "@/lib/action-state";
 import { sendEmail } from "@/lib/mailer";
@@ -17,6 +20,45 @@ async function requireAdminContext(): Promise<
   return { ctx };
 }
 
+function siteUrl(): string {
+  return process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+}
+
+async function sendExistingUserInviteEmail({
+  teamId,
+  inviterUserId,
+  email,
+}: {
+  teamId: string;
+  inviterUserId: string;
+  email: string;
+}) {
+  const team = await db.query.teams.findFirst({
+    where: eq(teams.id, teamId),
+    columns: { name: true },
+  });
+  const teamName = team?.name ?? "your team";
+
+  const clerk = await clerkClient();
+  const inviter = await clerk.users.getUser(inviterUserId);
+  const inviterEmail =
+    inviter.emailAddresses.find((e) => e.id === inviter.primaryEmailAddressId)
+      ?.emailAddress ?? "a team admin";
+
+  const acceptUrl = `${siteUrl()}/accept-invite?existing=1`;
+
+  try {
+    const { subject, html, text } = await renderTeamInviteEmail({
+      teamName,
+      inviterEmail,
+      acceptUrl,
+    });
+    await sendEmail({ to: [email], subject, html, text });
+  } catch (emailError) {
+    console.error("Failed to send team invite email:", emailError);
+  }
+}
+
 export async function updateFathomKey(
   _prevState: ActionState,
   formData: FormData,
@@ -27,13 +69,10 @@ export async function updateFathomKey(
   const fathomKey = (formData.get("fathomKey") as string)?.trim();
   if (!fathomKey) return { error: "Fathom API key cannot be empty." };
 
-  const admin = createAdminClient();
-  const { error } = await admin.rpc("set_team_fathom_key", {
-    p_team_id: result.ctx.teamId,
-    p_plaintext_key: fathomKey,
-    p_passphrase: process.env.SUPABASE_DB_ENCRYPTION_KEY,
-  });
-  if (error) return { error: error.message };
+  await db
+    .update(teams)
+    .set({ fathomApiKeyEnc: encryptFathomKey(fathomKey) })
+    .where(eq(teams.id, result.ctx.teamId));
 
   revalidatePath("/settings");
   revalidatePath("/");
@@ -50,104 +89,52 @@ export async function inviteMember(
   const email = (formData.get("email") as string)?.trim().toLowerCase();
   if (!email) return { error: "Email is required." };
 
-  const admin = createAdminClient();
-
-  const { data: existingInvite } = await admin
-    .from("invites")
-    .select("id")
-    .eq("team_id", result.ctx.teamId)
-    .eq("email", email)
-    .eq("status", "pending")
-    .maybeSingle();
+  const existingInvite = await db.query.invites.findFirst({
+    where: and(
+      eq(invites.teamId, result.ctx.teamId),
+      eq(invites.email, email),
+      eq(invites.status, "pending"),
+    ),
+    columns: { id: true },
+  });
   if (existingInvite) {
     return { error: "This email already has a pending invite." };
   }
 
-  let userId: string;
-  const { data: inviteData, error: inviteError } =
-    await admin.auth.admin.inviteUserByEmail(email, {
-      redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? ""}/auth/callback`,
+  const clerk = await clerkClient();
+  const { data: existingUsers } = await clerk.users.getUserList({
+    emailAddress: [email],
+  });
+  const existingUser = existingUsers[0];
+
+  let invitedUserId: string | null = null;
+
+  if (existingUser) {
+    invitedUserId = existingUser.id;
+    await sendExistingUserInviteEmail({
+      teamId: result.ctx.teamId,
+      inviterUserId: result.ctx.userId,
+      email,
     });
-
-  if (inviteError) {
-    if (!/already.*registered/i.test(inviteError.message)) {
-      return { error: inviteError.message };
-    }
-
-    const { data: listed, error: listError } =
-      await admin.auth.admin.listUsers();
-    if (listError) return { error: listError.message };
-
-    const existingUser = listed.users.find(
-      (u) => u.email?.toLowerCase() === email,
-    );
-    if (!existingUser) {
-      return { error: "Could not find the existing account for that email." };
-    }
-    userId = existingUser.id;
-
-    // Generate a magic link and send a team invite email for the existing user
-    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "";
-    const { data: linkData, error: linkError } =
-      await admin.auth.admin.generateLink({
-        type: "magiclink",
-        email,
-        options: { redirectTo: `${siteUrl}/auth/callback` },
-      });
-
-    if (linkError) {
-      return {
-        error: `Could not generate sign-in link: ${linkError.message}`,
-      };
-    }
-
-    const acceptUrl = linkData?.properties?.action_link;
-    if (!acceptUrl) {
-      return { error: "Could not generate sign-in link." };
-    }
-
-    // Get the team name for the email
-    const { data: team } = await admin
-      .from("teams")
-      .select("name")
-      .eq("id", result.ctx.teamId)
-      .single();
-
-    const teamName = team?.name ?? "your team";
-    const inviterUser = await createClient().auth.getUser();
-    const inviterEmail = inviterUser.data?.user?.email ?? "a team admin";
-
-    // Render and send the team invite email
-    try {
-      const { subject, html, text } = await renderTeamInviteEmail({
-        teamName,
-        inviterEmail,
-        acceptUrl,
-      });
-
-      await sendEmail({
-        to: [email],
-        subject,
-        html,
-        text,
-      });
-    } catch (emailError) {
-      // Log the error but don't fail the invite if email fails
-      console.error("Failed to send team invite email:", emailError);
-    }
   } else {
-    if (!inviteData.user) return { error: "Invite did not return a user." };
-    userId = inviteData.user.id;
+    try {
+      await clerk.invitations.createInvitation({
+        emailAddress: email,
+        redirectUrl: `${siteUrl()}/sso-callback`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Could not send invitation.";
+      return { error: message };
+    }
   }
 
-  const { error: inviteRowError } = await admin.from("invites").insert({
-    team_id: result.ctx.teamId,
+  await db.insert(invites).values({
+    teamId: result.ctx.teamId,
     email,
-    invited_by: result.ctx.userId,
-    invited_user_id: userId,
+    invitedBy: result.ctx.userId,
+    invitedUserId,
     status: "pending",
   });
-  if (inviteRowError) return { error: inviteRowError.message };
 
   revalidatePath("/settings");
   return null;
@@ -163,25 +150,48 @@ export async function resendInvite(
   const inviteId = formData.get("inviteId") as string;
   if (!inviteId) return { error: "Missing invite ID." };
 
-  const admin = createAdminClient();
-  const { data: invite } = await admin
-    .from("invites")
-    .select("email, team_id")
-    .eq("id", inviteId)
-    .single();
+  const invite = await db.query.invites.findFirst({
+    where: eq(invites.id, inviteId),
+    columns: { email: true, teamId: true, invitedUserId: true, status: true },
+  });
 
   if (!invite) return { error: "Invite not found." };
-  if (invite.team_id !== result.ctx.teamId) {
+  if (invite.teamId !== result.ctx.teamId) {
     return { error: "Not authorized to resend this invite." };
   }
+  if (invite.status !== "pending") {
+    return { error: "This invite is no longer pending." };
+  }
 
-  const { error: resetError } = await admin.auth.resetPasswordForEmail(
-    invite.email,
-    {
-      redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? ""}/auth/callback`,
-    },
-  );
-  if (resetError) return { error: resetError.message };
+  const clerk = await clerkClient();
+
+  if (invite.invitedUserId) {
+    await sendExistingUserInviteEmail({
+      teamId: result.ctx.teamId,
+      inviterUserId: result.ctx.userId,
+      email: invite.email,
+    });
+  } else {
+    const { data: pendingInvitations } = await clerk.invitations.getInvitationList({
+      status: "pending",
+      query: invite.email,
+    });
+    for (const pending of pendingInvitations) {
+      if (pending.emailAddress.toLowerCase() === invite.email.toLowerCase()) {
+        await clerk.invitations.revokeInvitation(pending.id);
+      }
+    }
+
+    try {
+      await clerk.invitations.createInvitation({
+        emailAddress: invite.email,
+        redirectUrl: `${siteUrl()}/sso-callback`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Could not resend invitation.";
+      return { error: message };
+    }
+  }
 
   revalidatePath("/settings");
   return null;
@@ -198,33 +208,38 @@ export async function updateMemberRole(
   const role = formData.get("role") as "admin" | "member";
   if (!memberId || !role) return { error: "Missing member or role." };
 
-  if (role === "member") {
-    const supabase = await createClient();
-    const { data: member } = await supabase
-      .from("team_members")
-      .select("user_id")
-      .eq("id", memberId)
-      .single();
+  try {
+    await db.transaction(async (tx) => {
+      if (role === "member") {
+        const member = await tx.query.teamMembers.findFirst({
+          where: eq(teamMembers.id, memberId),
+          columns: { id: true },
+        });
 
-    if (member) {
-      const { data: remainingAdmins } = await supabase
-        .from("team_members")
-        .select("id")
-        .eq("team_id", result.ctx.teamId)
-        .eq("role", "admin");
+        if (member) {
+          const remainingAdmins = await tx.query.teamMembers.findMany({
+            where: and(
+              eq(teamMembers.teamId, result.ctx.teamId),
+              eq(teamMembers.role, "admin"),
+            ),
+            columns: { id: true },
+          });
 
-      if (remainingAdmins && remainingAdmins.length === 1) {
-        return { error: "Cannot remove the last admin." };
+          if (remainingAdmins.length === 1) {
+            throw new Error("Cannot remove the last admin.");
+          }
+        }
       }
-    }
-  }
 
-  const supabase = await createClient();
-  const { error } = await supabase
-    .from("team_members")
-    .update({ role })
-    .eq("id", memberId);
-  if (error) return { error: error.message };
+      await tx
+        .update(teamMembers)
+        .set({ role })
+        .where(eq(teamMembers.id, memberId));
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not update role.";
+    return { error: message };
+  }
 
   revalidatePath("/settings");
   return null;
@@ -240,27 +255,33 @@ export async function removeMember(
   const memberId = formData.get("memberId") as string;
   if (!memberId) return { error: "Missing member." };
 
-  const supabase = await createClient();
-  const { data: member } = await supabase
-    .from("team_members")
-    .select("role")
-    .eq("id", memberId)
-    .single();
+  try {
+    await db.transaction(async (tx) => {
+      const member = await tx.query.teamMembers.findFirst({
+        where: eq(teamMembers.id, memberId),
+        columns: { role: true },
+      });
 
-  if (member?.role === "admin") {
-    const { data: remainingAdmins } = await supabase
-      .from("team_members")
-      .select("id")
-      .eq("team_id", result.ctx.teamId)
-      .eq("role", "admin");
+      if (member?.role === "admin") {
+        const remainingAdmins = await tx.query.teamMembers.findMany({
+          where: and(
+            eq(teamMembers.teamId, result.ctx.teamId),
+            eq(teamMembers.role, "admin"),
+          ),
+          columns: { id: true },
+        });
 
-    if (remainingAdmins && remainingAdmins.length === 1) {
-      return { error: "Cannot remove the last admin." };
-    }
+        if (remainingAdmins.length === 1) {
+          throw new Error("Cannot remove the last admin.");
+        }
+      }
+
+      await tx.delete(teamMembers).where(eq(teamMembers.id, memberId));
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not remove member.";
+    return { error: message };
   }
-
-  const { error } = await supabase.from("team_members").delete().eq("id", memberId);
-  if (error) return { error: error.message };
 
   revalidatePath("/settings");
   return null;

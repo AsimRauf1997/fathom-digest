@@ -1,394 +1,340 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { createFakeSupabaseSetup, FakeSupabaseClient, FakeDatabase, type EmailSendRecord } from './fixtures/fake-supabase';
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as fakeSchema from "./fixtures/fake-schema";
+import * as fakeDrizzleOrm from "./fixtures/fake-drizzle-orm";
+import { createFakeDb, type FakeDb } from "./fixtures/fake-db";
+import { createFakeClerkClient, makeClerkUser } from "./fixtures/fake-clerk";
 
-describe('inviteMember', () => {
-  let db: FakeDatabase;
-  let client: FakeSupabaseClient;
-  let emailLog: EmailSendRecord[];
+const fakeDb: FakeDb = createFakeDb();
+const fakeClerk = createFakeClerkClient();
 
-  beforeEach(() => {
-    const setup = createFakeSupabaseSetup();
-    db = setup.db;
-    client = setup.client;
-    emailLog = setup.emailLog;
+vi.mock("@/lib/db", () => ({ db: fakeDb }));
+vi.mock("@/lib/db/schema", () => fakeSchema);
+vi.mock("drizzle-orm", () => fakeDrizzleOrm);
+vi.mock("@clerk/nextjs/server", () => ({
+  auth: vi.fn(),
+  currentUser: vi.fn(),
+  clerkClient: vi.fn(async () => fakeClerk),
+}));
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+vi.mock("next/navigation", () => ({
+  redirect: vi.fn((url: string) => {
+    throw new Error(`REDIRECT:${url}`);
+  }),
+}));
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/mailer", () => ({ sendEmail: vi.fn(async () => ({})) }));
+vi.mock("@/lib/render-email", () => ({
+  renderTeamInviteEmail: vi.fn(async () => ({
+    subject: "invite-subject",
+    html: "<p>invite</p>",
+    text: "invite",
+  })),
+}));
 
-    // Setup: create a team and an admin user
-    const teamId = 'team-1';
-    const adminUserId = 'admin-1';
-    db.insert('teams', { id: teamId, name: 'Test Team' });
-    db.insert('team_members', {
-      id: 'member-1',
-      team_id: teamId,
-      user_id: adminUserId,
-      role: 'admin',
-    });
+async function loadModules() {
+  const { auth, currentUser, clerkClient } = await import("@clerk/nextjs/server");
+  const { sendEmail } = await import("@/lib/mailer");
+  const settingsActions = await import("@/app/settings/actions");
+  const acceptInviteActions = await import("@/app/accept-invite/actions");
+  return {
+    auth: auth as unknown as ReturnType<typeof vi.fn>,
+    currentUser: currentUser as unknown as ReturnType<typeof vi.fn>,
+    clerkClient: clerkClient as unknown as ReturnType<typeof vi.fn>,
+    sendEmail: sendEmail as unknown as ReturnType<typeof vi.fn>,
+    ...settingsActions,
+    ...acceptInviteActions,
+  };
+}
 
-    // Setup: set the admin as the current user
-    client.auth.setUser({ id: adminUserId, email: 'admin@example.com' });
-  });
+function asAdmin(authMock: ReturnType<typeof vi.fn>, userId: string) {
+  authMock.mockResolvedValue({ userId });
+}
 
-  it('should create a pending invite row and NOT create a team_members row on first invite', () => {
-    const email = 'newuser@example.com';
-    const teamId = 'team-1';
+beforeEach(() => {
+  fakeDb._data.teams.length = 0;
+  fakeDb._data.teamMembers.length = 0;
+  fakeDb._data.invites.length = 0;
+  fakeDb._data.users.length = 0;
+  fakeClerk._users.length = 0;
+  fakeClerk._invitations.length = 0;
+  vi.clearAllMocks();
+});
 
-    // Simulate inviteMember being called
-    // This should:
-    // 1. Create an invites row with status='pending'
-    // 2. NOT create a team_members row yet
-    db.insert('invites', {
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      status: 'pending',
-      invited_user_id: 'new-user-id',
-    });
+describe("inviteMember", () => {
+  it("creates a Clerk hosted invitation for a brand-new email, no team_members row yet", async () => {
+    const { auth, inviteMember } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Test Team" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
 
-    const invites = db.getAll('invites');
-    expect(invites).toHaveLength(1);
-    expect(invites[0]).toMatchObject({
-      team_id: teamId,
-      email,
-      status: 'pending',
-    });
+    const formData = new FormData();
+    formData.set("email", "newuser@example.com");
+    const result = await inviteMember(null, formData);
 
-    // Crucially: no team_members row should exist for this user yet
-    const teamMembers = db
-      .getAll('team_members')
-      .filter((m) => m.user_id === 'new-user-id' && m.team_id === teamId);
-    expect(teamMembers).toHaveLength(0);
-  });
-
-  it('should reuse existing auth.users row on re-invite-after-remove', () => {
-    const email = 'invited@example.com';
-    const teamId = 'team-1';
-    const invitedUserId = 'invited-user-1';
-
-    // Setup: first invite creates an invite row
-    db.insert('invites', {
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      status: 'pending',
-      invited_user_id: invitedUserId,
-    });
-
-    // After user accepts, team_members gets inserted
-    const memberRow = db.insert('team_members', {
-      team_id: teamId,
-      user_id: invitedUserId,
-      role: 'member',
-    });
-
-    // Update invite to accepted
-    db.update('invites',
-      db.getAll('invites').find((i) => i.email === email && i.status === 'pending')!.id,
-      { status: 'accepted' }
+    expect(result).toBeNull();
+    expect(fakeClerk.invitations.createInvitation).toHaveBeenCalledWith(
+      expect.objectContaining({ emailAddress: "newuser@example.com" }),
     );
 
-    // User is removed (team_members row deleted, but auth.users remains)
-    db.delete('team_members', memberRow.id);
-
-    // Now admin re-invites the same email
-    // Should NOT error with "already registered"
-    // Should create a NEW pending invites row (old one is still 'accepted')
-    // Should NOT create a team_members row yet
-
-    const existingPending = db.getAll('invites').filter((i) => i.email === email && i.status === 'pending');
-    expect(existingPending).toHaveLength(0); // Old one is 'accepted'
-
-    // Re-invite: insert a new pending invites row
-    db.insert('invites', {
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      status: 'pending',
-      invited_user_id: invitedUserId,
-    });
-
-    const allInvites = db.getAll('invites').filter((i) => i.email === email);
-    expect(allInvites.length).toBeGreaterThan(1); // Should have multiple rows (accepted + new pending)
-    expect(allInvites.filter((i) => i.status === 'pending')).toHaveLength(1); // But only one pending
-
-    const teamMemberRows = db
-      .getAll('team_members')
-      .filter((m) => m.user_id === invitedUserId && m.team_id === teamId);
-    expect(teamMemberRows).toHaveLength(0); // Still no team_members yet
-  });
-
-  it('should reject duplicate pending invites for same team+email', () => {
-    const email = 'user@example.com';
-    const teamId = 'team-1';
-
-    // First invite
-    db.insert('invites', {
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      status: 'pending',
-      invited_user_id: 'user-id',
-    });
-
-    // Try to invite again before first is accepted
-    // Should fail due to unique constraint
-    expect(() => {
-      db.insert('invites', {
-        team_id: teamId,
-        email,
-        invited_by: 'admin-1',
-        status: 'pending',
-        invited_user_id: 'user-id',
-      });
-    }).toThrow('duplicate key');
-  });
-
-  it('should NOT send password reset when re-inviting after removal', () => {
-    const email = 'reinvite@example.com';
-    const teamId = 'team-1';
-    const invitedUserId = 'invited-user-2';
-
-    // Setup: existing user has been invited and accepted
-    db.insert('invites', {
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      status: 'accepted',
-      invited_user_id: invitedUserId,
-    });
-
-    const memberRow = db.insert('team_members', {
-      team_id: teamId,
-      user_id: invitedUserId,
-      role: 'member',
-    });
-
-    // User is removed from team
-    db.delete('team_members', memberRow.id);
-
-    // Now we test the real inviteMember action
-    // First, verify the preconditions: accepted invite exists, no team_members
-    expect(db.getAll('invites').filter((i) => i.email === email && i.status === 'accepted')).toHaveLength(1);
-    expect(db.getAll('team_members').filter((m) => m.user_id === invitedUserId)).toHaveLength(0);
-
-    // Clear the call log to only see what happens on re-invite
-    client.callLog = [];
-
-    // When re-inviting an existing email, inviteUserByEmail will fail with "already registered"
-    // Then the code should:
-    // 1. Find the existing user from listUsers
-    // 2. Create a new pending invites row
-    // 3. NOT call resetPasswordForEmail
-    db.insert('invites', {
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      status: 'pending',
-      invited_user_id: invitedUserId,
-    });
-
-    // Check the invites: should have both accepted and pending
-    const allInvites = db.getAll('invites').filter((i) => i.email === email);
-    expect(allInvites.length).toBe(2);
-    expect(allInvites.filter((i) => i.status === 'accepted')).toHaveLength(1);
-    expect(allInvites.filter((i) => i.status === 'pending')).toHaveLength(1);
-
-    // Crucially: no team_members yet
-    const teamMembers = db
-      .getAll('team_members')
-      .filter((m) => m.user_id === invitedUserId && m.team_id === teamId);
-    expect(teamMembers).toHaveLength(0);
-  });
-
-  it('should send a team invite email when re-inviting an existing registered user', () => {
-    const email = 'existing-user@example.com';
-    const teamId = 'team-1';
-    const existingUserId = 'existing-user-id';
-
-    // Setup: email belongs to an existing registered user (in invites or auth)
-    client.auth.setUser({ id: 'admin-1', email: 'admin@example.com' });
-
-    // Clear logs to only see re-invite call
-    client.callLog = [];
-    emailLog.length = 0;
-
-    // Simulate inviteMember being called for an existing registered user:
-    // 1. inviteUserByEmail fails with "already registered"
-    // 2. Code calls listUsers to find the user
-    // 3. Code calls generateLink to create a magic link
-    // 4. Code sends a team invite email with that link
-    // 5. Code creates a pending invites row
-
-    // Simulate: inviteUserByEmail fails (already registered)
-    // Then: generateLink succeeds
-    const linkResponse = await client.auth.admin.generateLink({
-      type: 'magiclink',
-      email,
-      options: { redirectTo: 'https://example.com/auth/callback' },
-    });
-    expect(linkResponse.error).toBeNull();
-    const magicLink = linkResponse.data?.properties.action_link;
-
-    // Simulate: send email
-    emailLog.push({
-      to: [email],
-      subject: `You've been invited to join Test Team`,
-      html: `<p>Join <strong>Test Team</strong></p><p><a href="${magicLink}">Accept Invite</a></p>`,
-    });
-
-    // Simulate: create pending invites row
-    db.insert('invites', {
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      invited_user_id: existingUserId,
-      status: 'pending',
-    });
-
-    // Verify: email was sent
-    expect(emailLog).toHaveLength(1);
-    expect(emailLog[0].to).toEqual([email]);
-    expect(emailLog[0].html).toContain(magicLink);
-
-    // Verify: generateLink was called (not resetPasswordForEmail)
-    const generateLinkCall = client.callLog.find((c) => c.method === 'generateLink');
-    expect(generateLinkCall).toBeDefined();
-
-    const resetPasswordCall = client.callLog.find((c) => c.method === 'resetPasswordForEmail');
-    expect(resetPasswordCall).toBeUndefined();
-
-    // Verify: invites row was created
-    const invites = db.getAll('invites').filter((i) => i.email === email && i.status === 'pending');
+    const invites = fakeDb._data.invites.filter((i) => i.email === "newuser@example.com");
     expect(invites).toHaveLength(1);
-    expect(invites[0]).toMatchObject({
-      team_id: teamId,
-      email,
-      invited_by: 'admin-1',
-      status: 'pending',
+    expect(invites[0]).toMatchObject({ status: "pending", invitedUserId: null });
+
+    const members = fakeDb._data.teamMembers.filter((m) => m.teamId === "team-1" && m.userId !== "admin-1");
+    expect(members).toHaveLength(0);
+  });
+
+  it("sends the custom SendGrid email (no Clerk invitation) for an already-registered email", async () => {
+    const { auth, inviteMember, sendEmail } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Test Team" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
+    fakeClerk._users.push(makeClerkUser("admin-1", "admin@example.com"));
+    fakeClerk._users.push(makeClerkUser("existing-user-1", "existing@example.com"));
+
+    const formData = new FormData();
+    formData.set("email", "existing@example.com");
+    const result = await inviteMember(null, formData);
+
+    expect(result).toBeNull();
+    expect(fakeClerk.invitations.createInvitation).not.toHaveBeenCalled();
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ to: ["existing@example.com"] }),
+    );
+
+    const invites = fakeDb._data.invites.filter((i) => i.email === "existing@example.com");
+    expect(invites).toHaveLength(1);
+    expect(invites[0]).toMatchObject({ status: "pending", invitedUserId: "existing-user-1" });
+  });
+
+  it("rejects a duplicate pending invite for the same team+email", async () => {
+    const { auth, inviteMember } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Test Team" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
+    fakeDb._data.invites.push({
+      id: "invite-1",
+      teamId: "team-1",
+      email: "dup@example.com",
+      status: "pending",
+      invitedBy: "admin-1",
+      invitedUserId: null,
+      createdAt: new Date(),
     });
 
-    // Verify: no team_members row yet
-    const members = db.getAll('team_members').filter((m) => m.team_id === teamId && m.user_id === existingUserId);
+    const formData = new FormData();
+    formData.set("email", "dup@example.com");
+    const result = await inviteMember(null, formData);
+
+    expect(result).toEqual({ error: "This email already has a pending invite." });
+  });
+
+  it("reuses the existing Clerk account on re-invite after removal, without creating team_members", async () => {
+    const { auth, inviteMember } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Test Team" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
+    fakeClerk._users.push(makeClerkUser("admin-1", "admin@example.com"));
+    fakeClerk._users.push(makeClerkUser("invited-user-1", "invited@example.com"));
+    // Prior accepted invite + already-removed membership from a previous cycle.
+    fakeDb._data.invites.push({
+      id: "old-invite",
+      teamId: "team-1",
+      email: "invited@example.com",
+      status: "accepted",
+      invitedBy: "admin-1",
+      invitedUserId: "invited-user-1",
+      createdAt: new Date(),
+    });
+
+    const formData = new FormData();
+    formData.set("email", "invited@example.com");
+    const result = await inviteMember(null, formData);
+
+    expect(result).toBeNull();
+    const allInvites = fakeDb._data.invites.filter((i) => i.email === "invited@example.com");
+    expect(allInvites).toHaveLength(2);
+    expect(allInvites.filter((i) => i.status === "pending")).toHaveLength(1);
+    const members = fakeDb._data.teamMembers.filter((m) => m.userId === "invited-user-1");
     expect(members).toHaveLength(0);
   });
 });
 
-describe('acceptInvite', () => {
-  let db: FakeDatabase;
-  let client: FakeSupabaseClient;
+describe("resendInvite", () => {
+  it("revokes and recreates the Clerk invitation for a not-yet-registered invitee", async () => {
+    const { auth, inviteMember, resendInvite } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Test Team" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
 
-  beforeEach(() => {
-    const setup = createFakeSupabaseSetup();
-    db = setup.db;
-    client = setup.client;
+    const formData = new FormData();
+    formData.set("email", "newuser@example.com");
+    await inviteMember(null, formData);
+    const invite = fakeDb._data.invites[0];
+    expect(fakeClerk._invitations).toHaveLength(1);
 
-    // Setup: create two teams
-    db.insert('teams', { id: 'team-1', name: 'Team 1' });
-    db.insert('teams', { id: 'team-2', name: 'Team 2' });
+    const resendForm = new FormData();
+    resendForm.set("inviteId", invite.id as string);
+    const result = await resendInvite(null, resendForm);
+
+    expect(result).toBeNull();
+    expect(fakeClerk.invitations.revokeInvitation).toHaveBeenCalledTimes(1);
+    expect(fakeClerk.invitations.createInvitation).toHaveBeenCalledTimes(2);
   });
 
-  it('should return an error when user already belongs to a different team', () => {
-    const userEmail = 'user@example.com';
-    const userId = 'user-1';
-    const inviteTeamId = 'team-2';
-    const currentTeamId = 'team-1';
+  it("resends the custom email (no Clerk call) for an already-registered invitee", async () => {
+    const { auth, inviteMember, resendInvite, sendEmail } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Test Team" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
+    fakeClerk._users.push(makeClerkUser("admin-1", "admin@example.com"));
+    fakeClerk._users.push(makeClerkUser("existing-user-1", "existing@example.com"));
 
-    // Setup: user already belongs to team-1
-    client.auth.setUser({ id: userId, email: userEmail });
-    db.insert('team_members', {
-      team_id: currentTeamId,
-      user_id: userId,
-      role: 'member',
+    const formData = new FormData();
+    formData.set("email", "existing@example.com");
+    await inviteMember(null, formData);
+    const invite = fakeDb._data.invites[0];
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+
+    const resendForm = new FormData();
+    resendForm.set("inviteId", invite.id as string);
+    const result = await resendInvite(null, resendForm);
+
+    expect(result).toBeNull();
+    expect(sendEmail).toHaveBeenCalledTimes(2);
+    expect(fakeClerk.invitations.createInvitation).not.toHaveBeenCalled();
+  });
+});
+
+describe("acceptInvite", () => {
+  it("blocks accepting an invite to a different team than the caller's current team", async () => {
+    const { auth, acceptInvite } = await loadModules();
+    fakeDb._data.teams.push({ id: "team-1", name: "Team 1" }, { id: "team-2", name: "Team 2" });
+    fakeClerk._users.push(makeClerkUser("user-1", "user@example.com"));
+    asAdmin(auth, "user-1");
+
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "user-1", role: "member" });
+    fakeDb._data.invites.push({
+      id: "invite-1",
+      teamId: "team-2",
+      email: "user@example.com",
+      status: "pending",
+      invitedBy: "admin-2",
+      invitedUserId: "user-1",
+      createdAt: new Date(),
     });
 
-    // Setup: user has a pending invite to team-2
-    db.insert('invites', {
-      team_id: inviteTeamId,
-      email: userEmail,
-      invited_by: 'admin-1',
-      invited_user_id: userId,
-      status: 'pending',
+    const result = await acceptInvite();
+
+    expect(result).toEqual({
+      error: "You're already part of a team. Leave your current team before accepting this invite.",
     });
-
-    // When acceptInvite is called:
-    // 1. Current team context exists (team-1)
-    // 2. Invite team (team-2) differs from current team
-    // 3. Should return error and NOT mark invite as accepted or add team_members
-
-    // Simulate acceptInvite logic
-    const ctx = { userId, teamId: currentTeamId, role: 'member' as const };
-    const invite = db
-      .from('invites')
-      .select('id, team_id')
-      .eq('email', userEmail.toLowerCase())
-      .eq('status', 'pending')
-      .maybeSingle().data;
-
-    expect(invite).toBeTruthy();
-    expect(invite?.team_id).not.toBe(ctx.teamId);
-
-    // acceptInvite should have returned error early, not proceeding to update
-    // Verify: invite is still pending (not accepted)
-    const inviteAfter = db.getAll('invites').find((i) => i.email === userEmail);
-    expect(inviteAfter?.status).toBe('pending');
-
-    // Verify: no additional team_members row was created
-    const membersInTeam2 = db
-      .getAll('team_members')
-      .filter((m) => m.team_id === inviteTeamId && m.user_id === userId);
-    expect(membersInTeam2).toHaveLength(0);
+    const invite = fakeDb._data.invites.find((i) => i.id === "invite-1");
+    expect(invite?.status).toBe("pending");
+    const team2Members = fakeDb._data.teamMembers.filter((m) => m.teamId === "team-2");
+    expect(team2Members).toHaveLength(0);
   });
 
-  it('should allow acceptance when user is re-invited to the same team', () => {
-    const userEmail = 'user@example.com';
-    const userId = 'user-1';
-    const teamId = 'team-1';
+  it("accepts a re-invite to the same team without creating a duplicate membership", async () => {
+    const { auth, acceptInvite } = await loadModules();
+    fakeDb._data.teams.push({ id: "team-1", name: "Team 1" });
+    fakeClerk._users.push(makeClerkUser("user-1", "user@example.com"));
+    asAdmin(auth, "user-1");
 
-    // Setup: user belongs to team-1
-    client.auth.setUser({ id: userId, email: userEmail });
-    db.insert('team_members', {
-      team_id: teamId,
-      user_id: userId,
-      role: 'member',
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "user-1", role: "member" });
+    fakeDb._data.invites.push({
+      id: "invite-1",
+      teamId: "team-1",
+      email: "user@example.com",
+      status: "pending",
+      invitedBy: "admin-1",
+      invitedUserId: "user-1",
+      createdAt: new Date(),
     });
 
-    // Setup: user has a pending invite to the same team (re-invite after removal scenario)
-    const invite = db.insert('invites', {
-      team_id: teamId,
-      email: userEmail,
-      invited_by: 'admin-1',
-      invited_user_id: userId,
-      status: 'pending',
-    });
+    const result = await acceptInvite();
 
-    // When acceptInvite is called:
-    // 1. Current team context exists (team-1)
-    // 2. Invite team (team-1) matches current team
-    // 3. Should NOT error and should mark invite as accepted (no-op team_members insert due to existing membership)
-
-    const ctx = { userId, teamId, role: 'member' as const };
-    const currentInvite = db
-      .from('invites')
-      .select('id, team_id')
-      .eq('email', userEmail.toLowerCase())
-      .eq('status', 'pending')
-      .maybeSingle().data;
-
-    expect(currentInvite).toBeTruthy();
-    expect(currentInvite?.team_id).toBe(ctx.teamId);
-
-    // Simulate acceptInvite marking the invite as accepted
-    db.update('invites', invite.id, {
-      status: 'accepted',
-      accepted_at: new Date().toISOString(),
-    });
-
-    // Verify: invite is now accepted
-    const inviteAfter = db.getAll('invites').find((i) => i.id === invite.id);
-    expect(inviteAfter?.status).toBe('accepted');
-
-    // Verify: no additional team_members row (already exists)
-    const members = db
-      .getAll('team_members')
-      .filter((m) => m.team_id === teamId && m.user_id === userId);
+    expect(result).toBeNull();
+    const invite = fakeDb._data.invites.find((i) => i.id === "invite-1");
+    expect(invite?.status).toBe("accepted");
+    const members = fakeDb._data.teamMembers.filter((m) => m.teamId === "team-1" && m.userId === "user-1");
     expect(members).toHaveLength(1);
+  });
+});
+
+describe("last-admin invariant", () => {
+  it("blocks demoting the last admin", async () => {
+    const { auth, updateMemberRole } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Team 1" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
+
+    const formData = new FormData();
+    formData.set("memberId", "member-1");
+    formData.set("role", "member");
+    const result = await updateMemberRole(null, formData);
+
+    expect(result).toEqual({ error: "Cannot remove the last admin." });
+    const member = fakeDb._data.teamMembers.find((m) => m.id === "member-1");
+    expect(member?.role).toBe("admin");
+  });
+
+  it("blocks removing the last admin", async () => {
+    const { auth, removeMember } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Team 1" });
+    fakeDb._data.teamMembers.push({ id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" });
+
+    const formData = new FormData();
+    formData.set("memberId", "member-1");
+    const result = await removeMember(null, formData);
+
+    expect(result).toEqual({ error: "Cannot remove the last admin." });
+    expect(fakeDb._data.teamMembers).toHaveLength(1);
+  });
+
+  it("allows removing a non-last admin", async () => {
+    const { auth, removeMember } = await loadModules();
+    asAdmin(auth, "admin-1");
+    fakeDb._data.teams.push({ id: "team-1", name: "Team 1" });
+    fakeDb._data.teamMembers.push(
+      { id: "member-1", teamId: "team-1", userId: "admin-1", role: "admin" },
+      { id: "member-2", teamId: "team-1", userId: "admin-2", role: "admin" },
+    );
+
+    const formData = new FormData();
+    formData.set("memberId", "member-2");
+    const result = await removeMember(null, formData);
+
+    expect(result).toBeNull();
+    expect(fakeDb._data.teamMembers).toHaveLength(1);
+  });
+});
+
+describe("createTeam", () => {
+  it("creates a team and makes the caller its admin", async () => {
+    const { auth, currentUser } = await loadModules();
+    const { createTeam } = await import("@/app/onboarding/actions");
+    asAdmin(auth, "user-1");
+    currentUser.mockResolvedValue({
+      id: "user-1",
+      emailAddresses: [{ emailAddress: "user@example.com" }],
+      firstName: "Test",
+      lastName: "User",
+      imageUrl: null,
+    });
+
+    const formData = new FormData();
+    formData.set("name", "Brand New Team");
+
+    await expect(createTeam(null, formData)).rejects.toThrow("REDIRECT:/");
+
+    expect(fakeDb._data.teams).toHaveLength(1);
+    expect(fakeDb._data.teams[0]).toMatchObject({ name: "Brand New Team" });
+    const teamId = fakeDb._data.teams[0].id;
+    const members = fakeDb._data.teamMembers.filter((m) => m.teamId === teamId);
+    expect(members).toHaveLength(1);
+    expect(members[0]).toMatchObject({ userId: "user-1", role: "admin" });
   });
 });

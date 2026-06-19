@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { createClient } from "@/lib/supabase/client";
+import { useSignIn } from "@clerk/nextjs/legacy";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,7 +33,21 @@ function GoogleMark() {
   );
 }
 
+function errorMessage(err: unknown): string {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "errors" in err &&
+    Array.isArray((err as { errors: unknown }).errors)
+  ) {
+    const first = (err as { errors: { message?: string }[] }).errors[0];
+    if (first?.message) return first.message;
+  }
+  return "Something went wrong. Please try again.";
+}
+
 export default function LoginPage() {
+  const { signIn, setActive, isLoaded } = useSignIn();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -42,26 +56,42 @@ export default function LoginPage() {
 
   const signInWithPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isLoaded) return;
     setError(null);
     setLoading(true);
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    setLoading(false);
-    if (error) {
-      setError(error.message);
-      return;
+
+    try {
+      const result = await signIn.create({
+        identifier: email,
+        password,
+      });
+
+      if (result.status === "complete") {
+        await setActive({ session: result.createdSessionId });
+        window.location.href = "/";
+        return;
+      }
+
+      setError("Could not complete sign in. Please try again.");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setLoading(false);
     }
-    window.location.href = "/";
   };
 
   const signInWithGoogle = async () => {
+    if (!isLoaded) return;
     setError(null);
-    const supabase = createClient();
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: `${window.location.origin}/auth/callback` },
-    });
-    if (error) setError(error.message);
+    try {
+      await signIn.authenticateWithRedirect({
+        strategy: "oauth_google",
+        redirectUrl: "/sso-callback",
+        redirectUrlComplete: "/",
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+    }
   };
 
   return (

@@ -1,52 +1,54 @@
 "use server";
 
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { auth, clerkClient } from "@clerk/nextjs/server";
+import { and, desc, eq } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { invites, teamMembers } from "@/lib/db/schema";
 import { getCurrentTeamContext } from "@/lib/team-context";
 import type { ActionState } from "@/lib/action-state";
 
 export async function acceptInvite(): Promise<ActionState> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user?.email) return { error: "Not signed in." };
+  const { userId } = await auth();
+  if (!userId) return { error: "Not signed in." };
 
-  const admin = createAdminClient();
-  const { data: invite } = await admin
-    .from("invites")
-    .select("id, team_id")
-    .eq("email", user.email.toLowerCase())
-    .eq("status", "pending")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const clerk = await clerkClient();
+  const user = await clerk.users.getUser(userId);
+  const email = user.emailAddresses
+    .find((e) => e.id === user.primaryEmailAddressId)
+    ?.emailAddress?.toLowerCase();
+  if (!email) return { error: "Not signed in." };
+
+  const invite = await db.query.invites.findFirst({
+    where: and(eq(invites.email, email), eq(invites.status, "pending")),
+    orderBy: [desc(invites.createdAt)],
+    columns: { id: true, teamId: true },
+  });
 
   if (!invite) return { error: "No pending invite found for this account." };
 
   const ctx = await getCurrentTeamContext();
-  if (ctx && ctx.teamId !== invite.team_id) {
+  if (ctx && ctx.teamId !== invite.teamId) {
     return {
       error: "You're already part of a team. Leave your current team before accepting this invite.",
     };
   }
 
   if (!ctx) {
-    const { error: memberError } = await admin
-      .from("team_members")
-      .insert({ team_id: invite.team_id, user_id: user.id, role: "member" });
-    if (memberError) return { error: memberError.message };
+    await db.insert(teamMembers).values({
+      teamId: invite.teamId,
+      userId,
+      role: "member",
+    });
   }
 
-  const { error: updateError } = await admin
-    .from("invites")
-    .update({
+  await db
+    .update(invites)
+    .set({
       status: "accepted",
-      accepted_at: new Date().toISOString(),
-      invited_user_id: user.id,
+      acceptedAt: new Date(),
+      invitedUserId: userId,
     })
-    .eq("id", invite.id);
-  if (updateError) return { error: updateError.message };
+    .where(eq(invites.id, invite.id));
 
   return null;
 }

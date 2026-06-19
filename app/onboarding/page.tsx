@@ -1,24 +1,23 @@
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { auth } from "@clerk/nextjs/server";
+import { eq } from "drizzle-orm";
 import { AuthShell } from "@/components/auth/AuthShell";
 import { CreateTeamForm } from "@/components/onboarding/create-team-form";
+import { db } from "@/lib/db";
+import { teamMembers } from "@/lib/db/schema";
 
 export const dynamic = "force-dynamic";
 
 export default async function OnboardingPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
+  const { userId } = await auth();
+  if (!userId) {
     redirect("/login");
   }
 
-  const { data: membership } = await supabase
-    .from("team_members")
-    .select("team_id")
-    .eq("user_id", user.id)
-    .maybeSingle();
+  const membership = await db.query.teamMembers.findFirst({
+    where: eq(teamMembers.userId, userId),
+    columns: { teamId: true },
+  });
   if (membership) {
     redirect("/");
   }

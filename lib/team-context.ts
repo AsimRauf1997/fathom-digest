@@ -1,5 +1,9 @@
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import "server-only";
+import { auth } from "@clerk/nextjs/server";
+import { eq } from "drizzle-orm";
+import { db } from "@/lib/db";
+import { teamMembers, teams } from "@/lib/db/schema";
+import { decryptFathomKey } from "@/lib/crypto/fathom-key";
 
 export type TeamContext = {
   userId: string;
@@ -8,28 +12,23 @@ export type TeamContext = {
 };
 
 export async function getCurrentTeamContext(): Promise<TeamContext | null> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null;
+  const { userId } = await auth();
+  if (!userId) return null;
 
-  const { data: membership } = await supabase
-    .from("team_members")
-    .select("team_id, role")
-    .eq("user_id", user.id)
-    .maybeSingle();
+  const membership = await db.query.teamMembers.findFirst({
+    where: eq(teamMembers.userId, userId),
+    columns: { teamId: true, role: true },
+  });
   if (!membership) return null;
 
-  return { userId: user.id, teamId: membership.team_id, role: membership.role };
+  return { userId, teamId: membership.teamId, role: membership.role };
 }
 
 export async function getTeamFathomKey(teamId: string): Promise<string | null> {
-  const admin = createAdminClient();
-  const { data, error } = await admin.rpc("get_team_fathom_key", {
-    p_team_id: teamId,
-    p_passphrase: process.env.SUPABASE_DB_ENCRYPTION_KEY,
+  const team = await db.query.teams.findFirst({
+    where: eq(teams.id, teamId),
+    columns: { fathomApiKeyEnc: true },
   });
-  if (error) throw error;
-  return data ?? null;
+  if (!team?.fathomApiKeyEnc) return null;
+  return decryptFathomKey(team.fathomApiKeyEnc);
 }

@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { auth } from "@clerk/nextjs/server";
+import { and, desc, eq } from "drizzle-orm";
 import { Alert } from "@/components/ui/alert";
 import { FathomKeyForm } from "@/components/settings/fathom-key-form";
 import { InviteMemberForm } from "@/components/settings/invite-member-form";
@@ -9,6 +9,8 @@ import { InviteStatusBadge } from "@/components/settings/invite-status-badge";
 import { ResendInviteButton } from "@/components/settings/resend-invite-button";
 import AppHeader from "@/app/AppHeader";
 import AppFooter from "@/app/AppFooter";
+import { db } from "@/lib/db";
+import { invites, teamMembers, teams, users } from "@/lib/db/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -22,48 +24,43 @@ function longDate(d: Date): string {
 }
 
 export default async function SettingsPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  const { userId } = await auth();
+  if (!userId) redirect("/login");
 
-  const { data: membership } = await supabase
-    .from("team_members")
-    .select("team_id, role")
-    .eq("user_id", user.id)
-    .maybeSingle();
+  const membership = await db.query.teamMembers.findFirst({
+    where: eq(teamMembers.userId, userId),
+    columns: { teamId: true, role: true },
+  });
   if (!membership) redirect("/onboarding");
 
   const isAdmin = membership.role === "admin";
 
-  const { data: team } = await supabase
-    .from("teams")
-    .select("id, name, fathom_api_key_enc")
-    .eq("id", membership.team_id)
-    .single();
+  const team = await db.query.teams.findFirst({
+    where: eq(teams.id, membership.teamId),
+    columns: { id: true, name: true, fathomApiKeyEnc: true },
+  });
 
-  const { data: members } = await supabase
-    .from("team_members")
-    .select("id, user_id, role")
-    .eq("team_id", membership.team_id);
+  const membersWithEmail = await db
+    .select({
+      id: teamMembers.id,
+      userId: teamMembers.userId,
+      role: teamMembers.role,
+      email: users.email,
+    })
+    .from(teamMembers)
+    .innerJoin(users, eq(users.id, teamMembers.userId))
+    .where(eq(teamMembers.teamId, membership.teamId));
 
-  const { data: pendingInvites } = await supabase
-    .from("invites")
-    .select("id, email, status, created_at")
-    .eq("team_id", membership.team_id)
-    .eq("status", "pending")
-    .order("created_at", { ascending: false });
+  const pendingInvites = await db.query.invites.findMany({
+    where: and(
+      eq(invites.teamId, membership.teamId),
+      eq(invites.status, "pending"),
+    ),
+    orderBy: [desc(invites.createdAt)],
+    columns: { id: true, email: true, status: true, createdAt: true },
+  });
 
-  const admin = createAdminClient();
-  const membersWithEmail = await Promise.all(
-    (members ?? []).map(async (m) => {
-      const { data } = await admin.auth.admin.getUserById(m.user_id);
-      return { ...m, email: data.user?.email ?? m.user_id };
-    }),
-  );
-
-  const hasFathomKey = Boolean(team?.fathom_api_key_enc);
+  const hasFathomKey = Boolean(team?.fathomApiKeyEnc);
 
   return (
     <div className="wrap">
@@ -111,14 +108,14 @@ export default async function SettingsPage() {
               <li className="member-row" key={m.id}>
                 <span className="member-email">{m.email}</span>
                 <span className="member-role">{m.role}</span>
-                {isAdmin && m.user_id !== user.id && (
+                {isAdmin && m.userId !== userId && (
                   <span className="member-actions">
                     <MemberRowActions memberId={m.id} role={m.role} />
                   </span>
                 )}
               </li>
             ))}
-            {pendingInvites?.map((invite) => (
+            {pendingInvites.map((invite) => (
               <li className="member-row" key={invite.id} style={{ opacity: 0.7 }}>
                 <span className="member-email">{invite.email}</span>
                 <InviteStatusBadge status={invite.status} />

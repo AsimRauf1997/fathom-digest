@@ -1,59 +1,20 @@
-import { type NextRequest, NextResponse } from "next/server";
-import { createServerClient } from "@supabase/ssr";
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/signup", "/auth/callback"];
+const isPublicRoute = createRouteMatcher(["/login", "/signup", "/sso-callback"]);
 
-export async function proxy(request: NextRequest) {
-  let response = NextResponse.next({ request });
+export default clerkMiddleware(async (auth, req) => {
+  const { userId } = await auth();
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value),
-          );
-          response = NextResponse.next({ request });
-          cookiesToSet.forEach(({ name, value, options }) =>
-            response.cookies.set(name, value, options),
-          );
-        },
-      },
-    },
-  );
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  const path = request.nextUrl.pathname;
-  const isPublic = PUBLIC_PATHS.some((p) => path.startsWith(p));
-
-  if (!user && !isPublic) {
-    return NextResponse.redirect(new URL("/login", request.url));
-  }
-
-  if (user && !isPublic && path !== "/onboarding") {
-    const { data: membership } = await supabase
-      .from("team_members")
-      .select("team_id")
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (!membership) {
-      return NextResponse.redirect(new URL("/onboarding", request.url));
+  if (isPublicRoute(req)) {
+    if (userId && !req.nextUrl.pathname.startsWith("/sso-callback")) {
+      return NextResponse.redirect(new URL("/", req.url));
     }
+    return;
   }
 
-  if (user && isPublic && path !== "/auth/callback") {
-    return NextResponse.redirect(new URL("/", request.url));
-  }
-
-  return response;
-}
+  await auth.protect();
+});
 
 export const config = {
   matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],

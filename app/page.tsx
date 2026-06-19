@@ -1,28 +1,47 @@
 import { redirect } from "next/navigation";
+import { auth, currentUser } from "@clerk/nextjs/server";
+import { and, eq } from "drizzle-orm";
 import DigestApp from "./DigestApp";
-import { createClient } from "@/lib/supabase/server";
+import { db } from "@/lib/db";
+import { invites, teamMembers, teams } from "@/lib/db/schema";
 
 export const dynamic = "force-dynamic";
 
 export default async function Page() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  const { userId } = await auth();
+  if (!userId) redirect("/login");
 
-  const { data: membership } = await supabase
-    .from("team_members")
-    .select("team_id")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (!membership) redirect("/onboarding");
+  const membership = await db.query.teamMembers.findFirst({
+    where: eq(teamMembers.userId, userId),
+    columns: { teamId: true },
+  });
 
-  const { data: team } = await supabase
-    .from("teams")
-    .select("fathom_api_key_enc")
-    .eq("id", membership.team_id)
-    .single();
+  if (!membership) {
+    const user = await currentUser();
+    const email = user?.emailAddresses
+      .find((e) => e.id === user.primaryEmailAddressId)
+      ?.emailAddress?.toLowerCase();
 
-  return <DigestApp initialRecipients={[]} hasFathomKey={Boolean(team?.fathom_api_key_enc)} />;
+    if (email) {
+      const pending = await db.query.invites.findFirst({
+        where: and(eq(invites.email, email), eq(invites.status, "pending")),
+        columns: { id: true },
+      });
+      if (pending) redirect("/accept-invite?existing=1");
+    }
+
+    redirect("/onboarding");
+  }
+
+  const team = await db.query.teams.findFirst({
+    where: eq(teams.id, membership.teamId),
+    columns: { fathomApiKeyEnc: true },
+  });
+
+  return (
+    <DigestApp
+      initialRecipients={[]}
+      hasFathomKey={Boolean(team?.fathomApiKeyEnc)}
+    />
+  );
 }
