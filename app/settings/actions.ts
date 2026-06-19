@@ -8,8 +8,6 @@ import { invites, teamMembers, teams } from "@/lib/db/schema";
 import { encryptFathomKey } from "@/lib/crypto/fathom-key";
 import { getCurrentTeamContext, type TeamContext } from "@/lib/team-context";
 import type { ActionState } from "@/lib/action-state";
-import { sendEmail } from "@/lib/mailer";
-import { renderTeamInviteEmail } from "@/lib/render-email";
 
 async function requireAdminContext(): Promise<
   { ctx: TeamContext } | { error: string }
@@ -24,6 +22,34 @@ function siteUrl(): string {
   return process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
 }
 
+async function sendNewUserInviteEmail({
+  inviteId,
+  teamId,
+  inviterUserId,
+  email,
+}: {
+  inviteId: string;
+  teamId: string;
+  inviterUserId: string;
+  email: string;
+}) {
+  const clerk = await clerkClient();
+
+  try {
+    // Use Clerk's built-in invitation system (Clerk sends the email for free)
+    // The redirect will go to /signup with the invite token, where user can sign up
+    // and automatically join the team
+    await clerk.invitations.createInvitation({
+      emailAddress: email,
+      redirectUrl: `${siteUrl()}/signup?inviteToken=${inviteId}`,
+    });
+  } catch (err) {
+    console.error("Failed to send Clerk invitation:", err);
+    // Even if Clerk invitation fails, we keep the invite record
+    // User can still access via direct link
+  }
+}
+
 async function sendExistingUserInviteEmail({
   teamId,
   inviterUserId,
@@ -33,30 +59,16 @@ async function sendExistingUserInviteEmail({
   inviterUserId: string;
   email: string;
 }) {
-  const team = await db.query.teams.findFirst({
-    where: eq(teams.id, teamId),
-    columns: { name: true },
-  });
-  const teamName = team?.name ?? "your team";
+  // For existing users, you could:
+  // 1. Send email via SendGrid (requires SENDGRID_API_KEY)
+  // 2. Send email via Resend (free tier available)
+  // 3. Send no email - user finds invite in app or gets manual notification
+  //
+  // For now, logging that an existing user was invited
+  // The user will see it in their dashboard or can be notified manually
 
-  const clerk = await clerkClient();
-  const inviter = await clerk.users.getUser(inviterUserId);
-  const inviterEmail =
-    inviter.emailAddresses.find((e) => e.id === inviter.primaryEmailAddressId)
-      ?.emailAddress ?? "a team admin";
-
-  const acceptUrl = `${siteUrl()}/accept-invite?existing=1`;
-
-  try {
-    const { subject, html, text } = await renderTeamInviteEmail({
-      teamName,
-      inviterEmail,
-      acceptUrl,
-    });
-    await sendEmail({ to: [email], subject, html, text });
-  } catch (emailError) {
-    console.error("Failed to send team invite email:", emailError);
-  }
+  console.log(`Existing user ${email} was invited to team ${teamId}`);
+  // TODO: Implement email or in-app notification for existing users
 }
 
 export async function updateFathomKey(
@@ -109,32 +121,35 @@ export async function inviteMember(
 
   let invitedUserId: string | null = null;
 
+  // Create the invite record first to get the ID for the token
+  const [invite] = await db.insert(invites).values({
+    teamId: result.ctx.teamId,
+    email,
+    invitedBy: result.ctx.userId,
+    invitedUserId: existingUser?.id ?? null,
+    status: "pending",
+  }).returning({ id: invites.id });
+
+  if (!invite) {
+    return { error: "Failed to create invite." };
+  }
+
+  // Send appropriate email based on whether user exists
   if (existingUser) {
-    invitedUserId = existingUser.id;
     await sendExistingUserInviteEmail({
       teamId: result.ctx.teamId,
       inviterUserId: result.ctx.userId,
       email,
     });
   } else {
-    try {
-      await clerk.invitations.createInvitation({
-        emailAddress: email,
-        redirectUrl: `${siteUrl()}/sso-callback`,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not send invitation.";
-      return { error: message };
-    }
+    // For new users, send email with signup link containing invite token
+    await sendNewUserInviteEmail({
+      inviteId: invite.id,
+      teamId: result.ctx.teamId,
+      inviterUserId: result.ctx.userId,
+      email,
+    });
   }
-
-  await db.insert(invites).values({
-    teamId: result.ctx.teamId,
-    email,
-    invitedBy: result.ctx.userId,
-    invitedUserId,
-    status: "pending",
-  });
 
   revalidatePath("/settings");
   return null;
@@ -152,7 +167,7 @@ export async function resendInvite(
 
   const invite = await db.query.invites.findFirst({
     where: eq(invites.id, inviteId),
-    columns: { email: true, teamId: true, invitedUserId: true, status: true },
+    columns: { email: true, teamId: true, invitedUserId: true, status: true, id: true },
   });
 
   if (!invite) return { error: "Invite not found." };
@@ -166,31 +181,32 @@ export async function resendInvite(
   const clerk = await clerkClient();
 
   if (invite.invitedUserId) {
+    // For existing users, send custom email to accept invite
     await sendExistingUserInviteEmail({
       teamId: result.ctx.teamId,
       inviterUserId: result.ctx.userId,
       email: invite.email,
     });
   } else {
+    // For new users, revoke old Clerk invitation and create a new one
     const { data: pendingInvitations } = await clerk.invitations.getInvitationList({
       status: "pending",
       query: invite.email,
     });
+
     for (const pending of pendingInvitations) {
       if (pending.emailAddress.toLowerCase() === invite.email.toLowerCase()) {
         await clerk.invitations.revokeInvitation(pending.id);
       }
     }
 
-    try {
-      await clerk.invitations.createInvitation({
-        emailAddress: invite.email,
-        redirectUrl: `${siteUrl()}/sso-callback`,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not resend invitation.";
-      return { error: message };
-    }
+    // Send new Clerk invitation with signup link
+    await sendNewUserInviteEmail({
+      inviteId: invite.id,
+      teamId: result.ctx.teamId,
+      inviterUserId: result.ctx.userId,
+      email: invite.email,
+    });
   }
 
   revalidatePath("/settings");

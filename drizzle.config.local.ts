@@ -4,8 +4,7 @@ export default defineConfig({
   schema: "./lib/db/schema.ts",
   out: "./drizzle",
   dialect: "postgresql",
-  dbCredentials: { 
+  dbCredentials: {
     url: process.env.DATABASE_URL!,
   },
-  driver: "pg",
 });

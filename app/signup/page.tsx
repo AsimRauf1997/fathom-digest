@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import React from "react";
 import Link from "next/link";
 import { useSignUp } from "@clerk/nextjs/legacy";
 import { Button } from "@/components/ui/button";
@@ -47,7 +48,11 @@ function errorMessage(err: unknown): string {
   return "Something went wrong. Please try again.";
 }
 
-export default function SignupPage() {
+interface PageProps {
+  searchParams: Promise<{ inviteToken?: string; complete?: string }>;
+}
+
+export default function SignupPage({ searchParams }: PageProps) {
   const { signUp, setActive, isLoaded } = useSignUp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -57,6 +62,41 @@ export default function SignupPage() {
   const [loading, setLoading] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
   const [isVerifying, setIsVerifying] = useState(false);
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
+
+  // Extract invite token from URL and handle OAuth completion
+  React.useEffect(() => {
+    const handleParams = async () => {
+      const params = await searchParams;
+      if (params.inviteToken) {
+        setInviteToken(params.inviteToken);
+      }
+
+      // Handle OAuth completion (redirectUrlComplete)
+      if (params.complete === "1" && params.inviteToken && isLoaded) {
+        setLoading(true);
+        try {
+          // For Google OAuth, check if the session is active
+          if (signUp && signUp.createdSessionId) {
+            const { acceptSignupInvite } = await import("@/app/signup/actions");
+            await acceptSignupInvite(params.inviteToken);
+            window.location.href = "/";
+            return;
+          }
+          // If no session yet, let the normal flow complete
+        } catch (err) {
+          console.error("Failed to accept invite:", err);
+          setError("Failed to join team. Please contact support.");
+        } finally {
+          setLoading(false);
+        }
+      }
+    };
+
+    if (isLoaded) {
+      handleParams();
+    }
+  }, [searchParams, isLoaded]);
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -73,7 +113,23 @@ export default function SignupPage() {
       console.log("result", result);
       if (result.status === "complete") {
         await setActive({ session: result.createdSessionId });
-        window.location.href = "/onboarding";
+
+        // Create user record in database
+        await createUserRecord({
+          id: result.createdUserId!,
+          email,
+          name: null,
+          avatarUrl: null,
+        });
+
+        // If there's an invite token, accept the invite to auto-join the team
+        if (inviteToken) {
+          const { acceptSignupInvite } = await import("@/app/signup/actions");
+          await acceptSignupInvite(inviteToken);
+          window.location.href = "/";
+        } else {
+          window.location.href = "/onboarding";
+        }
         return;
       }
 
@@ -114,7 +170,14 @@ export default function SignupPage() {
           avatarUrl: null,
         });
 
-        window.location.href = "/onboarding";
+        // If there's an invite token, accept the invite to auto-join the team
+        if (inviteToken) {
+          const { acceptSignupInvite } = await import("@/app/signup/actions");
+          await acceptSignupInvite(inviteToken);
+          window.location.href = "/";
+        } else {
+          window.location.href = "/onboarding";
+        }
         return;
       }
 
@@ -130,10 +193,14 @@ export default function SignupPage() {
     if (!isLoaded) return;
     setError(null);
     try {
+      const redirectUrlComplete = inviteToken
+        ? `/signup?inviteToken=${inviteToken}&complete=1`
+        : "/onboarding";
+
       await signUp.authenticateWithRedirect({
         strategy: "oauth_google",
         redirectUrl: "/sso-callback",
-        redirectUrlComplete: "/onboarding",
+        redirectUrlComplete,
       });
     } catch (err) {
       setError(errorMessage(err));
