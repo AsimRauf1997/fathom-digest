@@ -3,7 +3,7 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { invites, teamMembers } from "@/lib/db/schema";
+import { invites, teamMembers, users } from "@/lib/db/schema";
 import { getCurrentTeamContext } from "@/lib/team-context";
 import type { ActionState } from "@/lib/action-state";
 
@@ -17,6 +17,21 @@ export async function acceptInvite(): Promise<ActionState> {
     .find((e) => e.id === user.primaryEmailAddressId)
     ?.emailAddress?.toLowerCase();
   if (!email) return { error: "Not signed in." };
+
+  // Ensure user record exists (create if missing due to signup issues)
+  const existingUser = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+    columns: { id: true },
+  });
+
+  if (!existingUser) {
+    await db.insert(users).values({
+      id: userId,
+      email: email,
+      name: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.firstName || null,
+      avatarUrl: user.imageUrl || null,
+    });
+  }
 
   const invite = await db.query.invites.findFirst({
     where: and(eq(invites.email, email), eq(invites.status, "pending")),
@@ -34,11 +49,21 @@ export async function acceptInvite(): Promise<ActionState> {
   }
 
   if (!ctx) {
-    await db.insert(teamMembers).values({
-      teamId: invite.teamId,
-      userId,
-      role: "member",
+    const existingMember = await db.query.teamMembers.findFirst({
+      where: and(
+        eq(teamMembers.userId, userId),
+        eq(teamMembers.teamId, invite.teamId)
+      ),
+      columns: { id: true },
     });
+
+    if (!existingMember) {
+      await db.insert(teamMembers).values({
+        teamId: invite.teamId,
+        userId,
+        role: "member",
+      });
+    }
   }
 
   await db
