@@ -71,9 +71,10 @@ export default function LoginPage() {
         window.location.href = "/";
         return;
       }
-
+      console.log({ result });
       setError("Could not complete sign in. Please try again.");
     } catch (err) {
+      console.error(err);
       setError(errorMessage(err));
     } finally {
       setLoading(false);

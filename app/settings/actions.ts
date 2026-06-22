@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { clerkClient } from "@clerk/nextjs/server";
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { invites, teamMembers, teams } from "@/lib/db/schema";
+import { invites, teamMembers, teams, users } from "@/lib/db/schema";
 import { encryptFathomKey } from "@/lib/crypto/fathom-key";
 import { getCurrentTeamContext, type TeamContext } from "@/lib/team-context";
 import type { ActionState } from "@/lib/action-state";
@@ -119,7 +119,26 @@ export async function inviteMember(
   });
   const existingUser = existingUsers[0];
 
-  let invitedUserId: string | null = null;
+  // Clerk and our users table can drift out of sync (e.g. signup flow issues),
+  // so backfill the user record before referencing it as a foreign key.
+  if (existingUser) {
+    const userRecord = await db.query.users.findFirst({
+      where: eq(users.id, existingUser.id),
+      columns: { id: true },
+    });
+
+    if (!userRecord) {
+      await db.insert(users).values({
+        id: existingUser.id,
+        email,
+        name:
+          existingUser.firstName && existingUser.lastName
+            ? `${existingUser.firstName} ${existingUser.lastName}`
+            : existingUser.firstName || null,
+        avatarUrl: existingUser.imageUrl || null,
+      });
+    }
+  }
 
   // Create the invite record first to get the ID for the token
   const [invite] = await db.insert(invites).values({
