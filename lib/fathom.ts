@@ -1,7 +1,7 @@
 import { Fathom } from "fathom-typescript";
 import { FathomError } from "fathom-typescript/sdk/models/errors";
 import type { Meeting as SdkMeeting } from "fathom-typescript/sdk/models/shared";
-import type { Meeting } from "./types";
+import type { Meeting, TranscriptItem } from "./types";
 import { stripMarkdownLinks } from "./markdown";
 
 function client(apiKey: string): Fathom {
@@ -96,4 +96,55 @@ export async function listMeetings(
   }
 
   return meetings;
+}
+
+/**
+ * Fetch the transcript for a single recording.
+ *
+ * This bypasses the SDK's `getRecordingTranscript` call: its generated
+ * outbound schema validates `destinationUrl` as a required string and
+ * throws "Input validation failed" before a request is even sent, even
+ * though the Fathom API itself treats it as optional (omitting it returns
+ * the transcript inline instead of POSTing it to a webhook).
+ */
+export async function getTranscript(
+  apiKey: string,
+  recordingId: string,
+): Promise<TranscriptItem[]> {
+  if (!apiKey) {
+    throw new Error(
+      "No Fathom API key configured for this team. Add one in Settings.",
+    );
+  }
+
+  const res = await fetch(
+    `https://api.fathom.ai/external/v1/recordings/${Number(recordingId)}/transcript`,
+    { headers: { "X-Api-Key": apiKey } },
+  );
+
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(
+        "Fathom rejected the API key (401/403). Check the Fathom API key configured in Settings and that your plan includes API access.",
+      );
+    }
+    const body = await res.text();
+    throw new Error(
+      `Fathom API error ${res.status}: ${body.slice(0, 300) || res.statusText}`,
+    );
+  }
+
+  const data = (await res.json()) as {
+    transcript: Array<{
+      speaker: { display_name: string };
+      text: string;
+      timestamp: string;
+    }>;
+  };
+
+  return data.transcript.map((item) => ({
+    speaker: item.speaker.display_name,
+    text: item.text,
+    timestamp: item.timestamp,
+  }));
 }

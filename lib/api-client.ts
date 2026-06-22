@@ -1,4 +1,4 @@
-import type { Meeting } from "./types";
+import type { Meeting, TranscriptItem } from "./types";
 
 async function asJson<T>(res: Response): Promise<T> {
   const data = await res.json();
@@ -10,6 +10,14 @@ export async function fetchMeetingsByDate(date: string): Promise<Meeting[]> {
   const res = await fetch(`/api/meetings?date=${date}`);
   const data = await asJson<{ meetings: Meeting[] }>(res);
   return data.meetings;
+}
+
+export async function fetchTranscript(
+  recordingId: string,
+): Promise<TranscriptItem[]> {
+  const res = await fetch(`/api/transcript?recordingId=${recordingId}`);
+  const data = await asJson<{ transcript: TranscriptItem[] }>(res);
+  return data.transcript;
 }
 
 export interface RenderPreviewInput {

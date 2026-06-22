@@ -15,3 +15,9 @@ export interface Meeting {
   url: string | null;
   shareUrl: string | null;
 }
+
+export interface TranscriptItem {
+  speaker: string;
+  text: string;
+  timestamp: string;
+}

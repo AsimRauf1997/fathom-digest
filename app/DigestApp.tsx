@@ -7,8 +7,13 @@ import type { Meeting } from "@/lib/types";
 import AppHeader from "./AppHeader";
 import AppFooter from "./AppFooter";
 import DatePicker from "./DatePicker";
-import { markdownToHtml } from "@/lib/markdown";
-import { fetchMeetingsByDate, renderPreview, sendDigest } from "@/lib/api-client";
+import MeetingDetail from "./MeetingDetail";
+import { excerptFromMarkdown } from "@/lib/markdown";
+import {
+  fetchMeetingsByDate,
+  renderPreview,
+  sendDigest,
+} from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +21,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Alert } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
+
+// Digest drafting & sending is paused for every role while the flow gets
+// reworked. Flip this back on to restore the compose column for admins.
+const DIGEST_SENDING_ENABLED = false;
 
 function todayStr(): string {
   const d = new Date();
@@ -43,10 +52,14 @@ type Status =
 export default function DigestApp({
   initialRecipients,
   hasFathomKey,
+  role,
 }: {
   initialRecipients: string[];
   hasFathomKey: boolean;
+  role: "admin" | "member";
 }) {
+  const showCompose = DIGEST_SENDING_ENABLED && role === "admin";
+
   const [date, setDate] = useState(todayStr());
   const [submittedDate, setSubmittedDate] = useState(todayStr());
 
@@ -58,6 +71,7 @@ export default function DigestApp({
     initialRecipients.length > 0 ? initialRecipients : [""],
   );
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const [openMeetingId, setOpenMeetingId] = useState<string | null>(null);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -103,7 +117,8 @@ export default function DigestApp({
   }, [submittedDate]);
 
   // Mirror load results (error / empty / loaded) into the status bar, and
-  // kick off a fresh preview render once meetings come back.
+  // kick off a fresh preview render once meetings come back — only when
+  // there's a compose panel around to show that preview.
   useEffect(() => {
     if (meetingsQuery.isError) {
       setStatus({
@@ -120,11 +135,13 @@ export default function DigestApp({
         setStatus({ kind: "info", msg: `No meetings found for ${label}.` });
       } else {
         setStatus({ kind: "idle" });
-        previewMutation.mutate({ label, meetings: meetingsQuery.data, intro });
+        if (showCompose) {
+          previewMutation.mutate({ label, meetings: meetingsQuery.data, intro });
+        }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingsQuery.isError, meetingsQuery.error, meetingsQuery.data, label]);
+  }, [meetingsQuery.isError, meetingsQuery.error, meetingsQuery.data, label, showCompose]);
 
   const submit = () => {
     setSubmittedDate(date);
@@ -161,6 +178,12 @@ export default function DigestApp({
   const recipientCount = recipients.filter((r) => r.trim()).length;
   const today = todayStr();
 
+  const meetingsCount = meetings?.length ?? 0;
+  const actionItemsCount =
+    meetings?.reduce((sum, m) => sum + m.actionItems.length, 0) ?? 0;
+  const kicker = submittedDate === today ? "Today’s notes" : "Archive edition";
+  const openMeeting = meetings?.find((m) => m.id === openMeetingId) ?? null;
+
   return (
     <div className="wrap">
       <AppHeader />
@@ -173,186 +196,274 @@ export default function DigestApp({
         </Alert>
       )}
 
-      {/* Source bar */}
-      <div className="sourcebar">
-        <div className="source-field">
-          <Label>Date</Label>
-          <DatePicker
-            value={date}
-            onChange={setDate}
-            max={today}
-            onEnter={submit}
-          />
+      <div className="edition-bar">
+        <div className="edition-id">
+          <span className="kicker">{kicker}</span>
+          <h1 className="edition-headline">{label}</h1>
         </div>
 
-        <Button className="fetch-btn" onClick={submit} disabled={loading}>
-          {loading ? <span className="spinner" /> : null}
-          {loading ? "Fetching" : "Fetch"}
-        </Button>
+        <div className="sourcebar">
+          <div className="source-field">
+            <Label>Date</Label>
+            <div className="dateline">
+              <DatePicker
+                value={date}
+                onChange={setDate}
+                max={today}
+                onEnter={submit}
+                joined
+              />
+              <span className="dateline-rule" aria-hidden />
+              <Button
+                type="button"
+                variant="primary"
+                className="dateline-fetch"
+                onClick={submit}
+                disabled={loading}
+              >
+                {loading ? <span className="spinner" /> : null}
+                {loading ? "Fetching" : "Fetch"}
+              </Button>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="columns">
-        {/* Left: meetings */}
-        <section>
-          <div className="col-head">
-            <h2>Meetings</h2>
-            <span className="count">
-              {meetings
-                ? `${meetings.length} item${meetings.length === 1 ? "" : "s"}`
-                : "—"}
-            </span>
-          </div>
+      {showCompose ? (
+        <div className="columns">
+          {/* Left: meetings */}
+          <section>
+            <MeetingsFeed
+              loading={loading}
+              meetings={meetings}
+              label={label}
+              onOpen={(m) => setOpenMeetingId(m.id)}
+            />
+          </section>
 
-          {loading && (
-            <div aria-hidden>
-              <SkeletonEntry />
-              <SkeletonEntry />
+          {/* Right: compose */}
+          <section className="compose">
+            <div className="col-head">
+              <h2>Compose</h2>
+              <span className="count">Compose &amp; send</span>
             </div>
-          )}
 
-          {!loading && !meetings && (
-            <p className="empty">
-              Pick a date and fetch to begin.
-              <span className="small">
-                Today’s meetings load automatically.
-              </span>
-            </p>
-          )}
+            <div className="panel">
+              <div className="stack">
+                <Label>Recipients</Label>
+                <div className="recipients">
+                  {recipients.map((r, i) => (
+                    <div className="recipient-row" key={i}>
+                      <Input
+                        type="text"
+                        className="font-mono text-[13px]"
+                        placeholder="name@example.com"
+                        value={r}
+                        onChange={(e) => {
+                          const next = [...recipients];
+                          next[i] = e.target.value;
+                          setRecipients(next);
+                        }}
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() =>
+                          setRecipients(
+                            recipients.length === 1
+                              ? [""]
+                              : recipients.filter((_, idx) => idx !== i),
+                          )
+                        }
+                        aria-label="Remove recipient"
+                      >
+                        ✕
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <Button
+                    variant="ghost"
+                    onClick={() => setRecipients([...recipients, ""])}
+                  >
+                    + Add
+                  </Button>
+                </div>
+              </div>
 
-          {!loading && meetings && meetings.length === 0 && (
-            <p className="empty">
-              No meetings for {label}.
-              <span className="small">Try another date.</span>
-            </p>
-          )}
+              <div className="stack">
+                <Label>Subject</Label>
+                <Input
+                  type="text"
+                  className="w-full"
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                />
+              </div>
 
-          {meetings?.map((m, i) => (
-            <MeetingEntry key={m.id} meeting={m} index={i} />
-          ))}
-        </section>
+              <div className="stack">
+                <Label>Intro note (optional)</Label>
+                <Textarea
+                  placeholder="Add a short note at the top of the email…"
+                  value={intro}
+                  onChange={(e) => onIntroChange(e.target.value)}
+                />
+              </div>
 
-        {/* Right: compose */}
-        <section className="compose">
-          <div className="col-head">
-            <h2>Compose</h2>
-            <span className="count">Compose &amp; send</span>
-          </div>
-
-          <div className="panel">
-            <div className="stack">
-              <Label>Recipients</Label>
-              <div className="recipients">
-                {recipients.map((r, i) => (
-                  <div className="recipient-row" key={i}>
-                    <Input
-                      type="text"
-                      className="font-mono text-[13px]"
-                      placeholder="name@example.com"
-                      value={r}
-                      onChange={(e) => {
-                        const next = [...recipients];
-                        next[i] = e.target.value;
-                        setRecipients(next);
-                      }}
-                    />
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() =>
-                        setRecipients(
-                          recipients.length === 1
-                            ? [""]
-                            : recipients.filter((_, idx) => idx !== i),
-                        )
-                      }
-                      aria-label="Remove recipient"
-                    >
-                      ✕
-                    </Button>
+              <div className="stack">
+                <div className="preview-head">
+                  <Label style={{ margin: 0 }}>Email preview</Label>
+                  {previewMutation.isPending && (
+                    <span className="muted" style={{ fontSize: 11 }}>
+                      <span className="spinner" />
+                      rendering
+                    </span>
+                  )}
+                </div>
+                {previewHtml ? (
+                  <iframe
+                    title="Email preview"
+                    srcDoc={previewHtml}
+                    className="preview-frame"
+                  />
+                ) : (
+                  <div className="preview-empty">
+                    <span>No preview yet.</span>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      Load meetings to render the email.
+                    </span>
                   </div>
-                ))}
-              </div>
-              <div style={{ marginTop: 8 }}>
-                <Button
-                  variant="ghost"
-                  onClick={() => setRecipients([...recipients, ""])}
-                >
-                  + Add
-                </Button>
-              </div>
-            </div>
-
-            <div className="stack">
-              <Label>Subject</Label>
-              <Input
-                type="text"
-                className="w-full"
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-              />
-            </div>
-
-            <div className="stack">
-              <Label>Intro note (optional)</Label>
-              <Textarea
-                placeholder="Add a short note at the top of the email…"
-                value={intro}
-                onChange={(e) => onIntroChange(e.target.value)}
-              />
-            </div>
-
-            <div className="stack">
-              <div className="preview-head">
-                <Label style={{ margin: 0 }}>Email preview</Label>
-                {previewMutation.isPending && (
-                  <span className="muted" style={{ fontSize: 11 }}>
-                    <span className="spinner" />
-                    rendering
-                  </span>
                 )}
               </div>
-              {previewHtml ? (
-                <iframe
-                  title="Email preview"
-                  srcDoc={previewHtml}
-                  className="preview-frame"
-                />
-              ) : (
-                <div className="preview-empty">
-                  <span>No preview yet.</span>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    Load meetings to render the email.
-                  </span>
-                </div>
+
+              <div className="send-row">
+                <Button
+                  variant="primary"
+                  size="primary"
+                  onClick={send}
+                  disabled={sendMutation.isPending || !meetings || meetings.length === 0}
+                >
+                  {sendMutation.isPending ? <span className="spinner" /> : null}
+                  {sendMutation.isPending ? "Sending" : "Send digest"}
+                </Button>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {recipientCount} recipient{recipientCount === 1 ? "" : "s"}
+                </span>
+              </div>
+
+              {status.kind !== "idle" && (
+                <Alert variant={status.kind} className="mt-4">
+                  {status.msg}
+                </Alert>
               )}
             </div>
+          </section>
+        </div>
+      ) : (
+        <div className="dash-grid">
+          <section className="dash-main">
+            <MeetingsFeed
+              loading={loading}
+              meetings={meetings}
+              label={label}
+              onOpen={(m) => setOpenMeetingId(m.id)}
+            />
+          </section>
 
-            <div className="send-row">
-              <Button
-                variant="primary"
-                size="primary"
-                onClick={send}
-                disabled={sendMutation.isPending || !meetings || meetings.length === 0}
-              >
-                {sendMutation.isPending ? <span className="spinner" /> : null}
-                {sendMutation.isPending ? "Sending" : "Send digest"}
-              </Button>
-              <span className="muted" style={{ fontSize: 12 }}>
-                {recipientCount} recipient{recipientCount === 1 ? "" : "s"}
+          <aside className="dash-rail sidebar-stats">
+            <div className="stats-head">Edition stats</div>
+
+            <div className="stat">
+              <span className="stat-num">
+                {meetingsCount}
+                <span className="unit">logged</span>
+              </span>
+              <span className="stat-label">Meetings captured for {label}</span>
+            </div>
+
+            <div className="stat">
+              <span className="stat-num">
+                {actionItemsCount}
+                <span className="unit">open</span>
+              </span>
+              <span className="stat-label">
+                Action items pulled from summaries
               </span>
             </div>
 
-            {status.kind !== "idle" && (
-              <Alert variant={status.kind} className="mt-4">
-                {status.msg}
-              </Alert>
-            )}
-          </div>
-        </section>
-      </div>
+            <div className="paused-note">
+              <strong>Sending is paused</strong>
+              Digest drafting and email delivery are offline for everyone —
+              admins included — while we rework the flow. Browse summaries
+              and full transcripts below in the meantime.
+            </div>
+          </aside>
+        </div>
+      )}
 
       <AppFooter date={longDate(today)} />
+
+      <MeetingDetail
+        meeting={openMeeting}
+        open={openMeetingId !== null}
+        onOpenChange={(next) => {
+          if (!next) setOpenMeetingId(null);
+        }}
+      />
     </div>
+  );
+}
+
+function MeetingsFeed({
+  loading,
+  meetings,
+  label,
+  onOpen,
+}: {
+  loading: boolean;
+  meetings: Meeting[] | null;
+  label: string;
+  onOpen: (meeting: Meeting) => void;
+}) {
+  return (
+    <>
+      <div className="col-head">
+        <h2>Meetings</h2>
+        <span className="count">
+          {meetings
+            ? `${meetings.length} item${meetings.length === 1 ? "" : "s"}`
+            : "—"}
+        </span>
+      </div>
+
+      {loading && (
+        <div aria-hidden>
+          <SkeletonEntry />
+          <SkeletonEntry />
+        </div>
+      )}
+
+      {!loading && !meetings && (
+        <p className="empty">
+          Pick a date and fetch to begin.
+          <span className="small">
+            Today’s meetings load automatically.
+          </span>
+        </p>
+      )}
+
+      {!loading && meetings && meetings.length === 0 && (
+        <p className="empty">
+          No meetings for {label}.
+          <span className="small">Try another date.</span>
+        </p>
+      )}
+
+      {meetings?.map((m, i) => (
+        <MeetingEntry key={m.id} meeting={m} index={i} onOpen={() => onOpen(m)} />
+      ))}
+    </>
   );
 }
 
@@ -368,47 +479,44 @@ function SkeletonEntry() {
   );
 }
 
-function MeetingEntry({ meeting, index }: { meeting: Meeting; index: number }) {
+function MeetingEntry({
+  meeting,
+  index,
+  onOpen,
+}: {
+  meeting: Meeting;
+  index: number;
+  onOpen: () => void;
+}) {
   const time = meeting.startedAt
     ? new Date(meeting.startedAt).toLocaleString(undefined, {
         hour: "2-digit",
         minute: "2-digit",
       })
     : "";
+  const excerpt = excerptFromMarkdown(meeting.summaryMarkdown);
+  const actionCount = meeting.actionItems.length;
+
   return (
     <article
-      className="entry"
+      className="entry entry-compact"
       style={{ animationDelay: `${Math.min(index * 60, 360)}ms` }}
     >
-      <h3>{meeting.title}</h3>
-      <div className="meta">
-        {time && <span>{time}</span>}
-        {time && <span className="dot" />}
-        <span>ID {meeting.id}</span>
-      </div>
-
-      {meeting.summaryMarkdown && (
-        <div
-          className="summary"
-          dangerouslySetInnerHTML={{
-            __html: markdownToHtml(meeting.summaryMarkdown),
-          }}
-        />
-      )}
-
-      {meeting.actionItems.length > 0 && (
-        <>
-          <div className="label-rule">Action items</div>
-          <ul className="actions-list">
-            {meeting.actionItems.map((a, i) => (
-              <li key={i}>
-                {a.description}
-                {a.assignee ? <span className="who"> — {a.assignee}</span> : null}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
+      <button type="button" className="entry-open" onClick={onOpen}>
+        <span className="num">No. {String(index + 1).padStart(2, "0")}</span>
+        <h3>{meeting.title}</h3>
+        <div className="meta">
+          {time && <span>{time}</span>}
+          {time && <span className="dot" />}
+          <span>ID {meeting.id}</span>
+          {actionCount > 0 && (
+            <span className="chip-actions">
+              {actionCount} open
+            </span>
+          )}
+        </div>
+        {excerpt && <p className="excerpt">{excerpt}</p>}
+      </button>
     </article>
   );
 }

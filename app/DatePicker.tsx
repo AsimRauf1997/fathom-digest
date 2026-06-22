@@ -39,11 +39,13 @@ export default function DatePicker({
   onChange,
   max,
   onEnter,
+  joined = false,
 }: {
   value: string;
   onChange: (v: string) => void;
   max?: string;
   onEnter?: () => void;
+  joined?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const selected = parseYMD(value);
@@ -73,9 +75,10 @@ export default function DatePicker({
             if (e.key === "Enter" && !open) onEnter?.();
           }}
           className={cn(
-            "flex h-10 w-full items-center gap-2.5 rounded-[var(--radius-sm)] border border-input bg-[var(--paper-3)] px-3.5 py-1.5 text-left font-sans text-[14px] text-foreground transition-colors",
-            "hover:border-ink-soft",
-            "data-[state=open]:border-accent data-[state=open]:ring-4 data-[state=open]:ring-accent-wash data-[state=open]:outline-none"
+            "flex h-10 items-center gap-2.5 px-3.5 py-1.5 text-left font-sans text-[14px] text-foreground transition-colors outline-none",
+            joined
+              ? "min-w-0 flex-1 bg-transparent"
+              : "w-full rounded-[var(--radius-sm)] border border-input bg-[var(--paper-3)] hover:border-ink-soft data-[state=open]:border-accent data-[state=open]:ring-4 data-[state=open]:ring-accent-wash"
           )}
         >
           <CalendarIcon className="size-4 text-accent" aria-hidden />

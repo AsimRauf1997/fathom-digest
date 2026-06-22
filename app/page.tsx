@@ -14,7 +14,7 @@ export default async function Page() {
 
   const membership = await db.query.teamMembers.findFirst({
     where: eq(teamMembers.userId, userId),
-    columns: { teamId: true },
+    columns: { teamId: true, role: true },
   });
 
   if (!membership) {
@@ -43,6 +43,7 @@ export default async function Page() {
     <DigestApp
       initialRecipients={[]}
       hasFathomKey={Boolean(team?.fathomApiKeyEnc)}
+      role={membership.role}
     />
   );
 }
